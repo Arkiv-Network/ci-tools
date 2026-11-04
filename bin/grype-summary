@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""grype-summary — turn grype JSON reports into summary.json, a Markdown report, and a gate verdict.
+
+    bin/grype-summary [--fail-on SEV] [--only-fixed|--all-fixes] [--no-fail] [--public] DIR SLUG=SOURCE…
+
+Reads DIR/reports/<SLUG>.grype.json for each source and writes DIR/summary.json. A source with
+DIR/errors/<SLUG>.txt failed to scan: its entry carries that message as `error` and no findings,
+and `totals.errors` counts such sources. The Markdown
+report goes to stdout, and is appended to $GITHUB_STEP_SUMMARY when that is set; the outputs
+`failed`, `fixable-high`, `fixable-critical`, `unfixed-high`, `unfixed-critical`, `ignored-high`,
+`ignored-critical`, `kev`, `ignored-kev`, `errors`, `output-dir` and `summary-json` are appended to
+$GITHUB_OUTPUT when that is set. The High counts include Critical; the ignored ones come from
+grype's `ignoredMatches`. An ignored finding's `ignored_by` is its rule's reason; with --public it is
+`accepted`, so a public repository's summary does not publish the reasoning.
+
+The gate counts matches grype did not ignore whose severity is at least --fail-on and, with
+--only-fixed (the default), that have a fix. Unknown severity never counts. Exit 0 = gate passed,
+1 = gate failed (0 with --no-fail; `failed` still reports true), 2 = usage or unreadable report.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import sys
+
+SEVERITIES = ["Critical", "High", "Medium", "Low", "Negligible", "Unknown"]
+RANK = {s: len(SEVERITIES) - i for i, s in enumerate(SEVERITIES)}
+RANK["Unknown"] = 0
+DIGEST = re.compile(r"@(sha256:[0-9a-f]{64})")
+
+
+def fix_state(vuln):
+    return (vuln.get("fix") or {}).get("state") or "unknown"
+
+
+def kev(vuln):
+    return bool(vuln.get("knownExploited"))
+
+
+def epss(vuln):
+    entries = vuln.get("epss") or []
+    return entries[0].get("epss") if entries else None
+
+
+def ignored_by(match):
+    rules = match.get("appliedIgnoreRules") or []
+    if not rules:
+        return None
+    rule = rules[0]
+    return rule.get("reason") or rule.get("vulnerability") or json.dumps(rule, sort_keys=True)
+
+
+def finding(match):
+    vuln, artifact = match["vulnerability"], match["artifact"]
+    return {
+        "id": vuln.get("id"),
+        "package": artifact.get("name"),
+        "version": artifact.get("version"),
+        "type": artifact.get("type"),
+        "severity": vuln.get("severity") or "Unknown",
+        "fix_state": fix_state(vuln),
+        "fix_versions": (vuln.get("fix") or {}).get("versions") or [],
+        "epss": epss(vuln),
+        "kev": kev(vuln),
+        "ignored_by": ignored_by(match),
+    }
+
+
+def summarize(source, slug, report):
+    active = [finding(m) for m in report.get("matches") or []]
+    ignored = [finding(m) for m in report.get("ignoredMatches") or []]
+    counts = {}
+    for f in active:
+        key = (f["severity"], f["fix_state"], f["kev"])
+        counts[key] = counts.get(key, 0) + 1
+    findings = [f for f in active + ignored if RANK.get(f["severity"], 0) >= RANK["Medium"]]
+    findings.sort(key=lambda f: (-RANK.get(f["severity"], 0), -(f["epss"] or 0), f["id"], f["package"]))
+    digest = DIGEST.search(source)
+    return {
+        "source": source,
+        "slug": slug,
+        "digest": digest.group(1) if digest else None,
+        "counts": [
+            {"severity": s, "fix_state": fs, "kev": k, "count": n}
+            for (s, fs, k), n in sorted(counts.items(), key=lambda i: (-RANK.get(i[0][0], 0), i[0][1], i[0][2]))
+        ],
+        "findings": findings,
+    }, active, ignored
+
+
+def gating(f, fail_on, only_fixed):
+    return RANK.get(f["severity"], 0) >= RANK[fail_on] and (not only_fixed or f["fix_state"] == "fixed")
+
+
+def markdown(summary, gate_count):
+    gate = summary["gate"]
+    lines = ["## SBOM scan", ""]
+    for src in summary["sources"]:
+        lines += [f"### `{src['source']}`", ""]
+        if "error" in src:
+            lines += [f"**Scan failed:** {src['error']}", ""]
+            continue
+        if src["findings"]:
+            lines += [
+                "| CVE | package | version | severity | fix | EPSS | KEV | ignored by |",
+                "|---|---|---|---|---|---|---|---|",
+            ]
+            for f in src["findings"]:
+                fix = ", ".join(f["fix_versions"]) if f["fix_state"] == "fixed" else f["fix_state"]
+                score = f"{f['epss'] * 100:.1f}%" if f["epss"] is not None else ""
+                lines.append(
+                    f"| {f['id']} | {f['package']} | {f['version']} | {f['severity']} | {fix} | {score} "
+                    f"| {'yes' if f['kev'] else ''} | {f['ignored_by'] or ''} |"
+                )
+        else:
+            lines.append("No Medium or higher findings.")
+        unfixed = [
+            f for f in src["findings"]
+            if f["ignored_by"] is None and RANK[f["severity"]] >= RANK["High"] and f["fix_state"] != "fixed"
+        ]
+        lines += ["", "**High and above without a fix:**", ""]
+        lines += [f"- {f['id']} in {f['package']} {f['version']} ({f['severity']}, {f['fix_state']})" for f in unfixed]
+        lines += [] if unfixed else ["- none"]
+        lines.append("")
+    t = summary["totals"]
+    scope = "with a fix" if gate["only_fixed"] else "fixed or not"
+    verdict = "FAILED" if gate["failed"] else "passed"
+    lines.append(
+        f"**Totals:** {t['fixable_high']} fixable High+ ({t['fixable_critical']} Critical), "
+        f"{t['unfixed_high']} unfixed High+ ({t['unfixed_critical']} Critical), "
+        f"{t['ignored_high']} ignored High+ ({t['ignored_critical']} Critical), {t['kev']} on CISA KEV ({t['ignored_kev']} ignored). "
+        f"**Gate {verdict}:** {gate_count} finding(s) at {gate['fail_on']} or above, {scope}."
+    )
+    errored = [src for src in summary["sources"] if "error" in src]
+    if errored:
+        lines += ["", f"**{len(errored)} source(s) failed to scan:**", ""]
+        lines += [f"- `{src['source']}`: {src['error']}" for src in errored]
+    return "\n".join(lines) + "\n"
+
+
+def append(var, text):
+    path = os.environ.get(var)
+    if path:
+        with open(path, "a") as fh:
+            fh.write(text)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Summarize grype reports and apply the gate.")
+    parser.add_argument("--fail-on", default="high", choices=[s.lower() for s in SEVERITIES[:-1]])
+    fixed = parser.add_mutually_exclusive_group()
+    fixed.add_argument("--only-fixed", dest="only_fixed", action="store_true", default=True)
+    fixed.add_argument("--all-fixes", dest="only_fixed", action="store_false")
+    parser.add_argument("--no-fail", action="store_true")
+    parser.add_argument("--public", action="store_true")
+    parser.add_argument("dir", metavar="DIR")
+    parser.add_argument("sources", nargs="+", metavar="SLUG=SOURCE")
+    args = parser.parse_args()
+    fail_on = args.fail_on.capitalize()
+
+    sources, active, ignored = [], [], []
+    for pair in args.sources:
+        slug, sep, source = pair.partition("=")
+        if not sep or not slug or not source:
+            parser.error(f"expected SLUG=SOURCE, got {pair!r}")
+        error_path = os.path.join(args.dir, "errors", f"{slug}.txt")
+        if os.path.exists(error_path):
+            src, _, _ = summarize(source, slug, {})
+            with open(error_path) as fh:
+                src["error"] = fh.read().strip()
+            sources.append(src)
+            continue
+        path = os.path.join(args.dir, "reports", f"{slug}.grype.json")
+        try:
+            with open(path) as fh:
+                report = json.load(fh)
+        except (OSError, ValueError) as e:
+            print(f"grype-summary: cannot read {path}: {e}", file=sys.stderr)
+            return 2
+        src, matches, accepted = summarize(source, slug, report)
+        if args.public:
+            for f in accepted:
+                f["ignored_by"] = "accepted"
+        sources.append(src)
+        active += matches
+        ignored += accepted
+
+    high = [f for f in active if RANK.get(f["severity"], 0) >= RANK["High"]]
+    ignored_high = [f for f in ignored if RANK.get(f["severity"], 0) >= RANK["High"]]
+    gate_count = sum(gating(f, fail_on, args.only_fixed) for f in active)
+    summary = {
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "gate": {"fail_on": args.fail_on, "only_fixed": args.only_fixed, "failed": gate_count > 0},
+        "sources": sources,
+        "totals": {
+            "fixable_high": sum(f["fix_state"] == "fixed" for f in high),
+            "fixable_critical": sum(f["fix_state"] == "fixed" and f["severity"] == "Critical" for f in high),
+            "unfixed_high": sum(f["fix_state"] != "fixed" for f in high),
+            "unfixed_critical": sum(f["fix_state"] != "fixed" and f["severity"] == "Critical" for f in high),
+            "ignored_high": len(ignored_high),
+            "ignored_critical": sum(f["severity"] == "Critical" for f in ignored_high),
+            "kev": sum(f["kev"] for f in active),
+            "ignored_kev": sum(f["kev"] for f in ignored),
+            "errors": sum("error" in src for src in sources),
+        },
+    }
+    summary_path = os.path.abspath(os.path.join(args.dir, "summary.json"))
+    with open(summary_path, "w") as fh:
+        json.dump(summary, fh, indent=2)
+        fh.write("\n")
+
+    md = markdown(summary, gate_count)
+    sys.stdout.write(md)
+    append("GITHUB_STEP_SUMMARY", md)
+    t = summary["totals"]
+    append(
+        "GITHUB_OUTPUT",
+        f"failed={'true' if gate_count else 'false'}\n"
+        + "".join(f"{k.replace('_', '-')}={v}\n" for k, v in t.items())
+        + f"output-dir={os.path.abspath(args.dir)}\nsummary-json={summary_path}\n",
+    )
+    return 1 if gate_count and not args.no_fail else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

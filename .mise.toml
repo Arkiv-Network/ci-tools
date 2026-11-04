@@ -1,0 +1,8 @@
+[tools]
+syft = "1.55.0"        # SBOM generation (bin/sbom-scan)
+grype = "0.121.0"      # vulnerability matching (bin/sbom-scan)
+yq = "4.53.3"          # read and merge the YAML ignore ledgers
+jq = "1.8.2"           # assertions in the tests and the self-test
+"conda:zstd" = "1.5.7" # compress what bin/sbom-store puts in the bucket; no upstream Linux binary
+shellcheck = "0.11.0"  # lint bin/ in CI
+actionlint = "1.7.9"   # lint .github/workflows in CI

@@ -1,0 +1,149 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  SELF_TEST_IMAGE: registry:docker.io/library/alpine:3.14.0@sha256:adab3844f497ab9171f070d4cae4114b5aec565ac772e2f2579405b78be67c96
+  SELF_TEST_SLUG: sha256-adab3844f497ab9171f070d4cae4114b5aec565ac772e2f2579405b78be67c96
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          # A named release: the action otherwise follows mise's VERSION endpoint, which moves before
+          # a release's assets are published.
+          version: 2026.9.2
+
+      - name: shellcheck
+        run: mise exec -- shellcheck -S warning bin/sbom-scan bin/sbom-store bin/tests/*.test.sh
+
+      - name: actionlint
+        run: mise exec -- actionlint
+
+      - name: Tests
+        run: |
+          for t in bin/tests/*.test.sh; do
+            echo "::group::$t"
+            mise exec -- bash "$t" </dev/null || exit 1
+            echo "::endgroup::"
+          done
+
+      # Self-test 1: alpine 3.14.0 carries fixable Highs and Criticals, so the gate must fail.
+      - id: gate-fails
+        uses: ./sbom-scan
+        continue-on-error: true
+        with:
+          sources: ${{ env.SELF_TEST_IMAGE }}
+          output-dir: self-test/fails
+          artifact-name: ""
+
+      - name: Self-test 1 failed the gate and wrote every file
+        env:
+          FAILED: ${{ steps.gate-fails.outputs.failed }}
+          OUTCOME: ${{ steps.gate-fails.outcome }}
+        run: |
+          [ "$FAILED" = true ] || { echo "failed=$FAILED, want true"; exit 1; }
+          [ "$OUTCOME" = failure ] || { echo "outcome=$OUTCOME, want failure"; exit 1; }
+          for f in "sbom/$SELF_TEST_SLUG.cdx.json" "sbom/$SELF_TEST_SLUG.syft.json" \
+            "reports/$SELF_TEST_SLUG.grype.json" summary.json; do
+            [ -s "self-test/fails/$f" ] || { echo "missing $f"; exit 1; }
+          done
+
+      # Self-test 2: a ledger accepting every fixed vulnerability self-test 1 found lets the gate pass.
+      - name: Generate a ledger accepting the fixed findings
+        run: |
+          # shellcheck disable=SC2016 # $exp is a jq variable
+          mise exec -- jq --arg exp "$(date -u -d '+30 days' +%F)" '{ignore: (
+              [.matches[] | select(.vulnerability.fix.state == "fixed") | .vulnerability.id] | unique
+              | map({vulnerability: ., "fix-state": "fixed", reason: "self-test", expires: $exp}))}' \
+            "self-test/fails/reports/$SELF_TEST_SLUG.grype.json" >self-test/accept.yaml
+
+      - id: gate-passes
+        uses: ./sbom-scan
+        with:
+          sources: ${{ env.SELF_TEST_IMAGE }}
+          ignore-file: self-test/accept.yaml
+          output-dir: self-test/passes
+          artifact-name: ""
+
+      - name: Self-test 2 passed the gate
+        env:
+          FAILED: ${{ steps.gate-passes.outputs.failed }}
+        run: '[ "$FAILED" = false ] || { echo "failed=$FAILED, want false"; exit 1; }'
+
+      # Self-test 3: a package rule on the location syft records alpine's apk packages at accepts
+      # every finding in them, so the gate passes and the findings are counted as ignored.
+      - name: Write a ledger with a package rule
+        run: |
+          cat >self-test/package.yaml <<YAML
+          ignore:
+            - package:
+                location: /lib/apk/db/installed
+              reason: self-test package rule
+              expires: $(date -u -d '+30 days' +%F)
+          YAML
+
+      - id: package-rule
+        uses: ./sbom-scan
+        with:
+          sources: ${{ env.SELF_TEST_IMAGE }}
+          ignore-file: self-test/package.yaml
+          output-dir: self-test/package
+          artifact-name: ""
+
+      - name: Self-test 3 passed the gate and counted the ignored findings
+        env:
+          FAILED: ${{ steps.package-rule.outputs.failed }}
+          OUTCOME: ${{ steps.package-rule.outcome }}
+          FIXABLE_HIGH: ${{ steps.package-rule.outputs.fixable-high }}
+          IGNORED_HIGH: ${{ steps.package-rule.outputs.ignored-high }}
+        run: |
+          [ "$OUTCOME" = success ] || { echo "outcome=$OUTCOME, want success"; exit 1; }
+          [ "$FAILED" = false ] || { echo "failed=$FAILED, want false"; exit 1; }
+          [ "$FIXABLE_HIGH" = 0 ] || { echo "fixable-high=$FIXABLE_HIGH, want 0"; exit 1; }
+          [ "$IGNORED_HIGH" -gt 0 ] || { echo "ignored-high=$IGNORED_HIGH, want > 0"; exit 1; }
+          mise exec -- jq -e '[.sources[].findings[] | select(.ignored_by == "self-test package rule")] | length > 0' \
+            self-test/package/summary.json >/dev/null || { echo "no finding ignored by the package rule"; exit 1; }
+          mise exec -- bin/grype-summary self-test/package "$SELF_TEST_SLUG=$SELF_TEST_IMAGE" \
+            | grep -qF '| self-test package rule |' || { echo "the report's ignored by column lacks the reason"; exit 1; }
+
+      # Self-test 4: the lint rejects an expired rule.
+      - name: Self-test 4 rejects an expired rule
+        run: |
+          if out="$(mise exec -- bin/check-grype-ignores bin/tests/fixtures/ignore-expired.yaml)"; then
+            echo "expired rule passed the lint"; exit 1
+          fi
+          echo "$out"
+          grep -q 'expired on' <<<"$out"
+
+      # Self-test 5: the package-rule run in public mode passes the gate without publishing the
+      # rule's reason or the ledger; artifact-name stays at its default and nothing is uploaded.
+      - id: public
+        uses: ./sbom-scan
+        with:
+          sources: ${{ env.SELF_TEST_IMAGE }}
+          ignore-file: self-test/package.yaml
+          output-dir: self-test/public
+          public: "true"
+
+      - name: Self-test 5 passed the gate and kept the rule's reason out
+        env:
+          FAILED: ${{ steps.public.outputs.failed }}
+          OUTCOME: ${{ steps.public.outcome }}
+          IGNORED_HIGH: ${{ steps.public.outputs.ignored-high }}
+        run: |
+          [ "$OUTCOME" = success ] || { echo "outcome=$OUTCOME, want success"; exit 1; }
+          [ "$FAILED" = false ] || { echo "failed=$FAILED, want false"; exit 1; }
+          [ "$IGNORED_HIGH" -gt 0 ] || { echo "ignored-high=$IGNORED_HIGH, want > 0"; exit 1; }
+          [ ! -e self-test/public/grype.yaml ] || { echo "the ledger landed in output-dir"; exit 1; }
+          ! grep -qF 'self-test package rule' self-test/public/summary.json || { echo "summary.json carries the reason"; exit 1; }
+          md="$(mise exec -- bin/grype-summary --public self-test/public "$SELF_TEST_SLUG=$SELF_TEST_IMAGE")"
+          grep -qF '| accepted |' <<<"$md" || { echo "the report's ignored by column does not read accepted"; exit 1; }
+          ! grep -qF 'self-test package rule' <<<"$md" || { echo "the report carries the reason"; exit 1; }

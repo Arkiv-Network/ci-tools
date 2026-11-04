@@ -1,0 +1,20 @@
+{
+  "matches": [
+    {"vulnerability": {"id": "CVE-2000-0001", "severity": "Critical", "fix": {"versions": ["9.9.9"], "state": "fixed"}, "knownExploited": [{"cve": "CVE-2000-0001"}]}, "artifact": {"name": "libfix", "version": "1.0.0", "type": "apk"}},
+    {"vulnerability": {"id": "CVE-2000-0002", "severity": "High", "fix": {"versions": ["9.9.9"], "state": "fixed"}, "knownExploited": null}, "artifact": {"name": "libfix", "version": "1.0.0", "type": "apk"}},
+    {"vulnerability": {"id": "CVE-2000-0003", "severity": "Critical", "fix": {"versions": [], "state": "not-fixed"}, "knownExploited": null}, "artifact": {"name": "libnofix", "version": "1.0.0", "type": "apk"}},
+    {"vulnerability": {"id": "CVE-2000-0004", "severity": "Critical", "fix": {"versions": [], "state": "wont-fix"}, "knownExploited": null}, "artifact": {"name": "libnofix", "version": "1.0.0", "type": "apk"}},
+    {"vulnerability": {"id": "CVE-2000-0005", "severity": "Critical", "fix": {"versions": [], "state": "unknown"}, "knownExploited": null}, "artifact": {"name": "libnofix", "version": "1.0.0", "type": "apk"}},
+    {"vulnerability": {"id": "CVE-2000-0006", "severity": "High", "fix": {"versions": [], "state": "not-fixed"}, "knownExploited": null}, "artifact": {"name": "libnofix", "version": "1.0.0", "type": "apk"}},
+    {"vulnerability": {"id": "CVE-2000-0007", "severity": "Medium", "fix": {"versions": ["9.9.9"], "state": "fixed"}, "knownExploited": null}, "artifact": {"name": "libfix", "version": "1.0.0", "type": "apk"}}
+  ],
+  "ignoredMatches": [
+    {"vulnerability": {"id": "CVE-2000-0101", "severity": "Critical", "fix": {"versions": ["9.9.9"], "state": "fixed"}, "knownExploited": [{"cve": "CVE-2000-0101"}]}, "artifact": {"name": "tool", "version": "1.0.0", "type": "binary"}, "appliedIgnoreRules": [{"reason": "upstream binary at its newest release", "namespace": "", "package": {"language": "", "location": "/usr/local/bin/tool"}}]},
+    {"vulnerability": {"id": "CVE-2000-0102", "severity": "Critical", "fix": {"versions": [], "state": "not-fixed"}, "knownExploited": null}, "artifact": {"name": "tool", "version": "1.0.0", "type": "binary"}, "appliedIgnoreRules": [{"reason": "upstream binary at its newest release", "namespace": "", "package": {"language": "", "location": "/usr/local/bin/tool"}}]},
+    {"vulnerability": {"id": "CVE-2000-0103", "severity": "Critical", "fix": {"versions": ["9.9.9"], "state": "fixed"}, "knownExploited": null}, "artifact": {"name": "tool", "version": "1.0.0", "type": "binary"}, "appliedIgnoreRules": [{"reason": "upstream binary at its newest release", "namespace": "", "package": {"language": "", "location": "/usr/local/bin/tool"}}]},
+    {"vulnerability": {"id": "CVE-2000-0104", "severity": "Critical", "fix": {"versions": [], "state": "unknown"}, "knownExploited": null}, "artifact": {"name": "tool", "version": "1.0.0", "type": "binary"}, "appliedIgnoreRules": [{"reason": "upstream binary at its newest release", "namespace": "", "package": {"language": "", "location": "/usr/local/bin/tool"}}]},
+    {"vulnerability": {"id": "CVE-2000-0105", "severity": "High", "fix": {"versions": ["9.9.9"], "state": "fixed"}, "knownExploited": null}, "artifact": {"name": "tool", "version": "1.0.0", "type": "binary"}, "appliedIgnoreRules": [{"reason": "upstream binary at its newest release", "namespace": "", "package": {"language": "", "location": "/usr/local/bin/tool"}}]},
+    {"vulnerability": {"id": "CVE-2000-0106", "severity": "Medium", "fix": {"versions": ["9.9.9"], "state": "fixed"}, "knownExploited": null}, "artifact": {"name": "tool", "version": "1.0.0", "type": "binary"}, "appliedIgnoreRules": [{"reason": "upstream binary at its newest release", "namespace": "", "package": {"language": "", "location": "/usr/local/bin/tool"}}]},
+    {"vulnerability": {"id": "CVE-2000-0107", "severity": "Critical", "fix": {"versions": ["9.9.9"], "state": "fixed"}, "knownExploited": null}, "artifact": {"name": "libvuln", "version": "1.0.0", "type": "apk"}, "appliedIgnoreRules": [{"vulnerability": "CVE-2000-0107", "reason": "not reachable", "namespace": ""}]}
+  ]
+}

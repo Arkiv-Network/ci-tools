@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# sbom-scan — generate an SBOM per source with syft, match it with grype, and gate on the result.
+#
+#   mise exec -- bin/sbom-scan [--out DIR] [--fail-on SEV] [--only-fixed|--all-fixes] \
+#     [--ignore FILE]… [--no-fail] [--public] SOURCE…
+#
+# SOURCE is a syft source (registry:<ref>@sha256:…, docker:<tag>, dir:<path>, oci-archive:<file>)
+# or sbom:<path or https URL> for a ready-made SBOM, which grype scans directly. With no SOURCE
+# arguments, sources are read from stdin, one per line.
+#
+# Writes into DIR (default sbom-scan): sbom/<slug>.cdx.json + sbom/<slug>.syft.json (or the copied
+# SBOM), reports/<slug>.grype.json, grype.yaml (the merged ignore ledger) and summary.json; prints
+# the Markdown report. A source whose fetch, syft or grype fails gets errors/<slug>.txt with the
+# message; the remaining sources are still scanned. The ignore ledger merges every --ignore FILE,
+# each linted with bin/check-grype-ignores first: the ignore lists concatenated, every other key from
+# the first file. With no --ignore it is `ignore: []`.
+#
+# --public is for a public repository, whose artifacts and job summary anyone can read: the merged
+# ledger goes to a temporary file, never DIR/grype.yaml, and summary.json and the report name
+# every ignored finding's rule as `accepted` instead of its reason.
+#
+# Exit 0 = gate passed, 1 = gate failed (0 with --no-fail) or a ledger failed the lint,
+# 2 = usage, 3 = syft, grype or curl failed on any source (also with --no-fail). Needs syft, grype,
+# yq and jq on PATH.
+set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() { sed -n '4,5p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+die() { echo "sbom-scan: $1" >&2; exit "${2:-2}"; }
+
+out=sbom-scan fail_on=high fixed=--only-fixed no_fail=() public=() ledgers=() sources=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --out) [ $# -ge 2 ] || usage; out="$2"; shift 2 ;;
+    --fail-on) [ $# -ge 2 ] || usage; fail_on="$2"; shift 2 ;;
+    --only-fixed | --all-fixes) fixed="$1"; shift ;;
+    --ignore) [ $# -ge 2 ] || usage; [ -f "$2" ] || die "no such ignore file: $2"; ledgers+=("$2"); shift 2 ;;
+    --no-fail) no_fail=(--no-fail); shift ;;
+    --public) public=(--public); shift ;;
+    -h | --help) usage ;;
+    -*) die "unknown option: $1" ;;
+    *) sources+=("$1"); shift ;;
+  esac
+done
+case "$fail_on" in critical | high | medium | low | negligible) ;; *) die "--fail-on must be critical, high, medium, low or negligible" ;; esac
+if [ ${#sources[@]} -eq 0 ] && [ ! -t 0 ]; then
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}" line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] && sources+=("$line")
+  done
+fi
+[ ${#sources[@]} -gt 0 ] || usage
+
+if [ ${#ledgers[@]} -gt 0 ] && ! lint="$("$ROOT/bin/check-grype-ignores" "${ledgers[@]}" 2>&1)"; then
+  echo "$lint" >&2
+  die "ignore ledger failed the lint" 1
+fi
+
+rm -rf "$out/errors"
+mkdir -p "$out/sbom" "$out/reports" "$out/errors" || die "cannot create $out" 3
+if [ ${#public[@]} -gt 0 ]; then
+  merged="$(mktemp --suffix=.yaml)" || die "cannot create a temporary file" 3
+  trap 'rm -f "$merged"' EXIT
+  rm -f "$out/grype.yaml"
+else
+  merged="$out/grype.yaml"
+fi
+{
+  if [ ${#ledgers[@]} -gt 0 ]; then yq -o=json -I0 '(. // {}) | del(.ignore)' "${ledgers[0]}"; else echo '{}'; fi
+  for l in ${ledgers[@]+"${ledgers[@]}"}; do yq -o=json -I0 '.ignore // []' "$l"; done
+} | jq -s '.[0] + {ignore: (.[1:] | add // [])}' | yq -p=json -o=yaml >"$merged" || die "cannot merge the ignore ledgers" 3
+
+slug() {
+  if [[ "$1" =~ @sha256:([0-9a-f]{64}) ]]; then echo "sha256-${BASH_REMATCH[1]}"; else echo "${1//[^A-Za-z0-9._-]/-}"; fi
+}
+
+pairs=() errors=0
+failed() { echo "sbom-scan: $1" >&2; echo "$1" >"$out/errors/$s.txt"; errors=$((errors + 1)); }
+for src in "${sources[@]}"; do
+  s="$(slug "$src")"
+  pairs+=("$s=$src")
+  if [[ "$src" == sbom:* ]]; then
+    from="${src#sbom:}" base="${src##*/}"
+    sbom="$out/sbom/$s"
+    ext="${base#*.}"
+    [[ "$base" == *.* && "$s" != *".$ext" ]] && sbom="$sbom.$ext"
+    if [[ "$from" == https://* ]]; then
+      curl -fsSL -o "$sbom" "$from" || { failed "cannot fetch $from"; continue; }
+    else
+      [ -f "$from" ] || die "no such SBOM file: $from"
+      cp "$from" "$sbom" || { failed "cannot copy $from"; continue; }
+    fi
+  else
+    sbom="$out/sbom/$s.syft.json"
+    syft "$src" -o "cyclonedx-json@1.6=$out/sbom/$s.cdx.json" -o "syft-json=$sbom" || { failed "syft failed on $src"; continue; }
+  fi
+  grype -c "$merged" "sbom:$sbom" -o json >"$out/reports/$s.grype.json" || failed "grype failed on $src"
+done
+
+"$ROOT/bin/grype-summary" --fail-on "$fail_on" "$fixed" ${no_fail[@]+"${no_fail[@]}"} ${public[@]+"${public[@]}"} "$out" "${pairs[@]}"
+rc=$?
+[ "$errors" -eq 0 ] || exit 3
+case $rc in 0 | 1) exit $rc ;; *) exit 3 ;; esac

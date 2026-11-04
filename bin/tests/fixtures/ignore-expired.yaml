@@ -1,0 +1,5 @@
+# A rule whose expiry is long past: bin/check-grype-ignores must reject it.
+ignore:
+  - vulnerability: CVE-2021-36159
+    reason: fixture rule with an expiry in the past
+    expires: 2020-01-01

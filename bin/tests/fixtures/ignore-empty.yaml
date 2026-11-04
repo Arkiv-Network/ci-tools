@@ -1,0 +1,2 @@
+# A ledger with no rules: bin/check-grype-ignores must accept it.
+ignore: []

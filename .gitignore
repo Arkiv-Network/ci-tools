@@ -1,0 +1,11 @@
+.direnv/
+.mise.local.toml
+mise.local.toml
+.claude/settings.local.json
+
+# Operator scratch
+/scratch/
+
+# Python bytecode cache (bin/ scripts are run directly, never imported)
+__pycache__/
+*.pyc

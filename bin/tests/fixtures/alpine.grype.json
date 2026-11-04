@@ -1,0 +1,365 @@
+{
+  "matches": [
+    {
+      "vulnerability": {
+        "id": "CVE-2021-3711",
+        "dataSource": "https://security.alpinelinux.org/vuln/CVE-2021-3711",
+        "namespace": "alpine:distro:alpine:3.14",
+        "severity": "Critical",
+        "fix": {
+          "versions": [
+            "1.1.1l-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "1.1.1l-r0",
+              "date": "2026-02-27",
+              "kind": "first-observed"
+            }
+          ]
+        },
+        "epss": [
+          {
+            "cve": "CVE-2021-3711",
+            "epss": 0.87816,
+            "percentile": 0.99759,
+            "date": "2026-10-27"
+          }
+        ],
+        "knownExploited": null,
+        "risk": 82.54704000000001
+      },
+      "artifact": {
+        "name": "libcrypto1.1",
+        "version": "1.1.1k-r0",
+        "type": "apk",
+        "purl": "pkg:apk/alpine/libcrypto1.1@1.1.1k-r0?arch=x86_64&distro=alpine-3.14.0&upstream=openssl"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "CVE-2022-0778",
+        "dataSource": "https://security.alpinelinux.org/vuln/CVE-2022-0778",
+        "namespace": "alpine:distro:alpine:3.14",
+        "severity": "High",
+        "fix": {
+          "versions": [
+            "1.1.1n-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "1.1.1n-r0",
+              "date": "2026-02-27",
+              "kind": "first-observed"
+            }
+          ]
+        },
+        "epss": [
+          {
+            "cve": "CVE-2022-0778",
+            "epss": 0.73188,
+            "percentile": 0.99455,
+            "date": "2026-10-27"
+          }
+        ],
+        "knownExploited": null,
+        "risk": 54.891
+      },
+      "artifact": {
+        "name": "libssl1.1",
+        "version": "1.1.1k-r0",
+        "type": "apk",
+        "purl": "pkg:apk/alpine/libssl1.1@1.1.1k-r0?arch=x86_64&distro=alpine-3.14.0&upstream=openssl"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "CVE-2021-36159",
+        "dataSource": "https://security.alpinelinux.org/vuln/CVE-2021-36159",
+        "namespace": "alpine:distro:alpine:3.14",
+        "severity": "Critical",
+        "fix": {
+          "versions": [
+            "2.12.6-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "2.12.6-r0",
+              "date": "2026-02-27",
+              "kind": "first-observed"
+            }
+          ]
+        },
+        "epss": [
+          {
+            "cve": "CVE-2021-36159",
+            "epss": 0.02637,
+            "percentile": 0.85481,
+            "date": "2026-10-27"
+          }
+        ],
+        "knownExploited": [
+          {
+            "cve": "CVE-2021-36159",
+            "vendorProject": "Alpine",
+            "product": "apk-tools",
+            "dateAdded": "2026-01-01",
+            "knownRansomwareCampaignUse": "Unknown"
+          }
+        ],
+        "risk": 2.386485
+      },
+      "artifact": {
+        "name": "apk-tools",
+        "version": "2.12.5-r1",
+        "type": "apk",
+        "purl": "pkg:apk/alpine/apk-tools@2.12.5-r1?arch=x86_64&distro=alpine-3.14.0"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "CVE-2024-5535",
+        "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2024-5535",
+        "namespace": "nvd:cpe",
+        "severity": "Critical",
+        "fix": {
+          "versions": [],
+          "state": "unknown"
+        },
+        "epss": [
+          {
+            "cve": "CVE-2024-5535",
+            "epss": 0.05582,
+            "percentile": 0.92845,
+            "date": "2026-10-27"
+          }
+        ],
+        "knownExploited": null,
+        "risk": 5.05171
+      },
+      "artifact": {
+        "name": "libcrypto1.1",
+        "version": "1.1.1k-r0",
+        "type": "apk",
+        "purl": "pkg:apk/alpine/libcrypto1.1@1.1.1k-r0?arch=x86_64&distro=alpine-3.14.0&upstream=openssl"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "CVE-2026-45447",
+        "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2026-45447",
+        "namespace": "nvd:cpe",
+        "severity": "High",
+        "fix": {
+          "versions": [],
+          "state": "unknown"
+        },
+        "epss": [
+          {
+            "cve": "CVE-2026-45447",
+            "epss": 0.04002,
+            "percentile": 0.90481,
+            "date": "2026-10-27"
+          }
+        ],
+        "knownExploited": null,
+        "risk": 3.191595
+      },
+      "artifact": {
+        "name": "libssl1.1",
+        "version": "1.1.1k-r0",
+        "type": "apk",
+        "purl": "pkg:apk/alpine/libssl1.1@1.1.1k-r0?arch=x86_64&distro=alpine-3.14.0&upstream=openssl"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "CVE-2022-48174",
+        "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2022-48174",
+        "namespace": "nvd:cpe",
+        "severity": "Critical",
+        "fix": {
+          "versions": [],
+          "state": ""
+        },
+        "epss": [
+          {
+            "cve": "CVE-2022-48174",
+            "epss": 0.03158,
+            "percentile": 0.87906,
+            "date": "2026-10-27"
+          }
+        ],
+        "knownExploited": null,
+        "risk": 2.96852
+      },
+      "artifact": {
+        "name": "busybox",
+        "version": "1.33.1-r2",
+        "type": "apk",
+        "purl": "pkg:apk/alpine/busybox@1.33.1-r2?arch=x86_64&distro=alpine-3.14.0"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "CVE-2022-2097",
+        "dataSource": "https://security.alpinelinux.org/vuln/CVE-2022-2097",
+        "namespace": "alpine:distro:alpine:3.14",
+        "severity": "Medium",
+        "fix": {
+          "versions": [
+            "1.1.1q-r0"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "1.1.1q-r0",
+              "date": "2026-02-27",
+              "kind": "first-observed"
+            }
+          ]
+        },
+        "epss": [
+          {
+            "cve": "CVE-2022-2097",
+            "epss": 0.04899,
+            "percentile": 0.92046,
+            "date": "2026-10-27"
+          }
+        ],
+        "knownExploited": null,
+        "risk": 2.5229850000000003
+      },
+      "artifact": {
+        "name": "libcrypto1.1",
+        "version": "1.1.1k-r0",
+        "type": "apk",
+        "purl": "pkg:apk/alpine/libcrypto1.1@1.1.1k-r0?arch=x86_64&distro=alpine-3.14.0&upstream=openssl"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "CVE-2023-2650",
+        "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2023-2650",
+        "namespace": "nvd:cpe",
+        "severity": "Medium",
+        "fix": {
+          "versions": [],
+          "state": "unknown"
+        },
+        "epss": [
+          {
+            "cve": "CVE-2023-2650",
+            "epss": 0.75358,
+            "percentile": 0.99512,
+            "date": "2026-10-27"
+          }
+        ],
+        "knownExploited": null,
+        "risk": 43.33085
+      },
+      "artifact": {
+        "name": "libssl1.1",
+        "version": "1.1.1k-r0",
+        "type": "apk",
+        "purl": "pkg:apk/alpine/libssl1.1@1.1.1k-r0?arch=x86_64&distro=alpine-3.14.0&upstream=openssl"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "CVE-2026-54872",
+        "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2026-54872",
+        "namespace": "nvd:cpe",
+        "severity": "Low",
+        "fix": {
+          "versions": [],
+          "state": "unknown"
+        },
+        "epss": [
+          {
+            "cve": "CVE-2026-54872",
+            "epss": 0.00428,
+            "percentile": 0.36825,
+            "date": "2026-10-27"
+          }
+        ],
+        "knownExploited": null,
+        "risk": 0.14337999999999998
+      },
+      "artifact": {
+        "name": "libcrypto1.1",
+        "version": "1.1.1k-r0",
+        "type": "apk",
+        "purl": "pkg:apk/alpine/libcrypto1.1@1.1.1k-r0?arch=x86_64&distro=alpine-3.14.0&upstream=openssl"
+      }
+    }
+  ],
+  "ignoredMatches": [
+    {
+      "vulnerability": {
+        "id": "CVE-2022-28391",
+        "dataSource": "https://security.alpinelinux.org/vuln/CVE-2022-28391",
+        "namespace": "alpine:distro:alpine:3.14",
+        "severity": "High",
+        "fix": {
+          "versions": [
+            "1.33.1-r7"
+          ],
+          "state": "fixed",
+          "available": [
+            {
+              "version": "1.33.1-r7",
+              "date": "2026-02-27",
+              "kind": "first-observed"
+            }
+          ]
+        },
+        "epss": [
+          {
+            "cve": "CVE-2022-28391",
+            "epss": 0.03521,
+            "percentile": 0.89165,
+            "date": "2026-10-27"
+          }
+        ],
+        "knownExploited": null,
+        "risk": 2.869615
+      },
+      "artifact": {
+        "name": "busybox",
+        "version": "1.33.1-r2",
+        "type": "apk",
+        "purl": "pkg:apk/alpine/busybox@1.33.1-r2?arch=x86_64&distro=alpine-3.14.0"
+      },
+      "appliedIgnoreRules": [
+        {
+          "vulnerability": "CVE-2022-28391",
+          "reason": "fixture rule",
+          "namespace": ""
+        }
+      ]
+    }
+  ],
+  "source": {
+    "type": "image",
+    "target": {
+      "userInput": "docker.io/library/alpine:3.14.0",
+      "manifestDigest": "sha256:1775bebec23e1f3ce486989bfc9ff3c4e951690df84aa9f926497d82f2ffca9d",
+      "repoDigests": [
+        "index.docker.io/library/alpine@sha256:adab3844f497ab9171f070d4cae4114b5aec565ac772e2f2579405b78be67c96"
+      ]
+    }
+  },
+  "distro": {
+    "name": "alpine",
+    "version": "3.14.0",
+    "idLike": []
+  },
+  "descriptor": {
+    "name": "grype",
+    "version": "0.121.0"
+  }
+}

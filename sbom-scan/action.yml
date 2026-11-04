@@ -1,0 +1,113 @@
+name: sbom-scan
+description: >-
+  Generate an SBOM per source with syft, match it with grype against the caller's ignore ledger,
+  publish the report, and fail on fixable findings at or above a severity.
+
+inputs:
+  sources:
+    description: >-
+      One source per line: registry:<ref>@sha256:…, docker:<tag>, dir:<path>, oci-archive:<file>,
+      or sbom:<path or https URL> for a ready-made SBOM (scanned by grype only).
+    required: true
+  fail-on:
+    description: Lowest severity that fails the gate (critical, high, medium, low, negligible).
+    default: high
+  only-fixed:
+    description: Count only findings with a fix available toward the gate.
+    default: "true"
+  ignore-file:
+    description: The ignore ledger; when empty, the caller's .grype.yaml at the workspace root if it exists.
+    default: ""
+  fail:
+    description: false = report only; the step succeeds whatever the gate says.
+    default: "true"
+  output-dir:
+    description: Where the SBOMs, reports and summary.json land, relative to the workspace.
+    default: sbom-scan
+  artifact-name:
+    description: Name of the workflow artifact holding output-dir; empty = no upload.
+    default: sbom-scan
+  public:
+    description: >-
+      true for a public repository: ignored findings read `accepted` in the summary and in
+      summary.json instead of the rule's reason, the ignore ledger stays out of output-dir, and
+      nothing is uploaded whatever artifact-name says.
+    default: "false"
+
+outputs:
+  failed:
+    description: true when the gate found something, whether or not the step failed.
+    value: ${{ steps.scan.outputs.failed }}
+  fixable-high:
+    description: Findings at High or above, not ignored, with a fix.
+    value: ${{ steps.scan.outputs.fixable-high }}
+  fixable-critical:
+    description: The Critical part of fixable-high.
+    value: ${{ steps.scan.outputs.fixable-critical }}
+  unfixed-high:
+    description: Findings at High or above, not ignored, without a fix.
+    value: ${{ steps.scan.outputs.unfixed-high }}
+  unfixed-critical:
+    description: The Critical part of unfixed-high.
+    value: ${{ steps.scan.outputs.unfixed-critical }}
+  ignored-high:
+    description: Findings at High or above accepted by an ignore rule, fixed or not.
+    value: ${{ steps.scan.outputs.ignored-high }}
+  ignored-critical:
+    description: The Critical part of ignored-high.
+    value: ${{ steps.scan.outputs.ignored-critical }}
+  kev:
+    description: Findings not ignored on the CISA Known Exploited Vulnerabilities list.
+    value: ${{ steps.scan.outputs.kev }}
+  ignored-kev:
+    description: Findings accepted by an ignore rule that are on the CISA Known Exploited Vulnerabilities list.
+    value: ${{ steps.scan.outputs.ignored-kev }}
+  output-dir:
+    description: Absolute path of the output directory.
+    value: ${{ steps.scan.outputs.output-dir }}
+  summary-json:
+    description: Absolute path of summary.json.
+    value: ${{ steps.scan.outputs.summary-json }}
+
+runs:
+  using: composite
+  steps:
+    - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+      with:
+        # A named release: the action otherwise follows mise's VERSION endpoint, which moves before
+        # a release's assets are published.
+        version: 2026.9.2
+        working_directory: ${{ github.action_path }}/..
+
+    - id: scan
+      shell: bash
+      env:
+        SOURCES: ${{ inputs.sources }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        ONLY_FIXED: ${{ inputs.only-fixed }}
+        IGNORE_FILE: ${{ inputs.ignore-file }}
+        FAIL: ${{ inputs.fail }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        PUBLIC: ${{ inputs.public }}
+      # mise -C selects ci-tools' pinned tools but also changes directory; env -C returns to the
+      # workspace so relative sources and paths resolve there.
+      run: |
+        root="$GITHUB_ACTION_PATH/.."
+        args=(--out "$OUTPUT_DIR" --fail-on "$FAIL_ON" --only-fixed)
+        [ "$ONLY_FIXED" = true ] || args+=(--all-fixes)
+        [ "$FAIL" = true ] || args+=(--no-fail)
+        [ "$PUBLIC" != true ] || args+=(--public)
+        if [ -n "$IGNORE_FILE" ]; then
+          args+=(--ignore "$IGNORE_FILE")
+        elif [ -f "$GITHUB_WORKSPACE/.grype.yaml" ]; then
+          args+=(--ignore .grype.yaml)
+        fi
+        printf '%s\n' "$SOURCES" |
+          mise exec -C "$root" -- env -C "$GITHUB_WORKSPACE" "$root/bin/sbom-scan" "${args[@]}"
+
+    - if: always() && inputs.artifact-name != '' && inputs.public != 'true'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.output-dir }}
+        if-no-files-found: ignore

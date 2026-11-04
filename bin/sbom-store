@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# sbom-store — find which SBOMs the SBOM bucket lacks, and store SBOMs, grype reports and the run
+# manifest put-once.
+#
+#   bin/sbom-store missing <LINES
+#   bin/sbom-store put --scan-dir DIR --source NAME <LINES
+#
+# LINES: one `<key> <ref|-> <source>` per line on stdin; key = sha256:<hex>, ref = the image ref or
+# - (not an image), source = the sbom-scan source the key was scanned from. Blank lines are skipped.
+#
+# missing: HEAD sbom/<key>.syft.json.zst, then sbom/<key>.cdx.json.zst, per key; prints the lines
+# whose key lacks either (404), so a partly stored key is scanned and stored again.
+#
+# put: for each line whose source is in DIR/summary.json without an error, zstd-compresses that
+# slug's sbom/<slug>.cdx.json, sbom/<slug>.syft.json and reports/<slug>.grype.json and stores them as
+# sbom/<key>.cdx.json.zst, sbom/<key>.syft.json.zst and
+# reports/<date>/<NAME>/<run-id>/<key>.grype.json.zst. A source absent from summary.json was not
+# scanned and stores nothing. Then writes runs/<date>/<NAME>/<run-id>/manifest.json (schema v1):
+# every line whose ref is not -, refs grouped by key. Each object is put-once: HEAD; on 404 PUT; 200
+# or a 409 on PUT is present. Prints `stored|present|failed <key path>` per object, after trying all.
+# <date> is the UTC date, <run-id> $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT; the manifest's run comes from
+# GITHUB_REPOSITORY, GITHUB_WORKFLOW, GITHUB_RUN_ID and GITHUB_SHA.
+#
+# Bucket from R2_SBOM_ENDPOINT, R2_SBOM_BUCKET, R2_SBOM_ACCESS_KEY_ID and R2_SBOM_SECRET_ACCESS_KEY,
+# requests signed by curl --aws-sigv4; the credential reaches curl through a config on a pipe, never
+# argv, and is never printed.
+#
+# Exit 0 = done, 2 = usage or missing environment, 3 = a request returned an unexpected status
+# (missing) or an object failed (put). Needs curl, jq and zstd on PATH.
+set -uo pipefail
+
+usage() { sed -n '5,6p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+die() { echo "sbom-store: $1" >&2; exit "${2:-2}"; }
+
+mode="${1:-}"
+[ $# -gt 0 ] && shift
+scan_dir="" source=""
+case "$mode" in
+  missing) [ $# -eq 0 ] || usage ;;
+  put)
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --scan-dir) [ $# -ge 2 ] || usage; scan_dir="$2"; shift 2 ;;
+        --source) [ $# -ge 2 ] || usage; source="$2"; shift 2 ;;
+        *) die "unknown argument: $1" ;;
+      esac
+    done
+    [ -n "$scan_dir" ] && [ -n "$source" ] || usage
+    [[ "$source" =~ ^[A-Za-z0-9._-]+$ ]] || die "--source must match [A-Za-z0-9._-]+"
+    ;;
+  *) usage ;;
+esac
+
+required=(R2_SBOM_ENDPOINT R2_SBOM_BUCKET R2_SBOM_ACCESS_KEY_ID R2_SBOM_SECRET_ACCESS_KEY)
+[ "$mode" = put ] && required+=(GITHUB_REPOSITORY GITHUB_WORKFLOW GITHUB_RUN_ID GITHUB_RUN_ATTEMPT GITHUB_SHA)
+for v in "${required[@]}"; do
+  [ -n "${!v:-}" ] || die "$v is not set"
+done
+
+lines=() keys=() refs=() srcs=()
+while IFS= read -r line || [ -n "$line" ]; do
+  read -r k r s extra <<<"$line"
+  [ -n "${k:-}" ] || continue
+  [[ "$k" =~ ^sha256:[0-9a-f]{64}$ && -n "${s:-}" && -z "${extra:-}" ]] || die "not a '<key> <ref|-> <source>' line: $line"
+  lines+=("$k $r $s") keys+=("$k") refs+=("$r") srcs+=("$s")
+done
+
+base="${R2_SBOM_ENDPOINT%/}/$R2_SBOM_BUCKET"
+
+# Escaped for a double-quoted curl config value.
+user="$R2_SBOM_ACCESS_KEY_ID:$R2_SBOM_SECRET_ACCESS_KEY"
+user="${user//\\/\\\\}" user="${user//\"/\\\"}"
+
+# http METHOD KEY_PATH [FILE] — prints the HTTP status, 000 when no response came back.
+http() {
+  local args=(-sS -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:auto:s3")
+  case "$1" in
+    HEAD) args+=(-I) ;;
+    PUT) args+=(-T "$3") ;;
+  esac
+  # The pipe must be opened on curl's own command line to stay open while curl runs.
+  curl "${args[@]}" -K <(printf 'user = "%s"\n' "$user") "$base/${2//:/%3A}"
+}
+
+if [ "$mode" = missing ]; then
+  declare -A absent
+  for i in "${!lines[@]}"; do
+    k="${keys[$i]}"
+    if [ -z "${absent[$k]:-}" ]; then
+      absent[$k]=no
+      for kind in syft cdx; do
+        code="$(http HEAD "sbom/$k.$kind.json.zst")"
+        case "$code" in
+          404) absent[$k]=yes; break ;;
+          200) ;;
+          *) die "HEAD sbom/$k.$kind.json.zst: HTTP $code" 3 ;;
+        esac
+      done
+    fi
+    [ "${absent[$k]}" = no ] || echo "${lines[$i]}"
+  done
+  exit 0
+fi
+
+for t in jq zstd; do
+  command -v "$t" >/dev/null || die "$t is not on PATH"
+done
+TMP="$(mktemp -d)" || die "cannot create a temporary directory" 3
+trap 'rm -rf "$TMP"' EXIT
+
+failures=0
+# put_once FILE KEY_PATH
+put_once() {
+  local code result=failed
+  code="$(http HEAD "$2")"
+  case "$code" in
+    200) result=present ;;
+    404)
+      code="$(http PUT "$2" "$1")"
+      case "$code" in 200 | 201) result=stored ;; 409) result=present ;; esac
+      ;;
+  esac
+  [ "$result" = failed ] && { echo "sbom-store: $2: HTTP $code" >&2; failures=$((failures + 1)); }
+  echo "$result $2"
+}
+
+# A scan directory without summary.json scanned nothing: every line was already stored.
+declare -A slug
+summary="$scan_dir/summary.json"
+if [ -f "$summary" ]; then
+  scanned="$(jq -r '.sources[] | select(has("error") | not) | "\(.source)\t\(.slug)"' "$summary")" \
+    || die "cannot read $summary" 3
+  while IFS=$'\t' read -r s sl; do [ -z "$s" ] || slug[$s]="$sl"; done <<<"$scanned"
+fi
+
+date="$(date -u +%F)" run_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+declare -A seen
+for i in "${!lines[@]}"; do
+  k="${keys[$i]}" sl="${slug[${srcs[$i]}]:-}"
+  [ -n "$sl" ] && [ -z "${seen[$k]:-}" ] || continue
+  seen[$k]=1
+  for pair in "sbom/$sl.cdx.json=sbom/$k.cdx.json.zst" "sbom/$sl.syft.json=sbom/$k.syft.json.zst" \
+    "reports/$sl.grype.json=reports/$date/$source/$run_id/$k.grype.json.zst"; do
+    from="$scan_dir/${pair%%=*}" to="${pair#*=}" z="$TMP/${pair#*=}"
+    mkdir -p "${z%/*}"
+    if zstd -q -c "$from" >"$z"; then
+      put_once "$z" "$to"
+    else
+      echo "sbom-store: cannot compress $from" >&2
+      echo "failed $to"
+      failures=$((failures + 1))
+    fi
+  done
+done
+
+manifest="$TMP/manifest.json"
+for i in "${!lines[@]}"; do
+  [ "${refs[$i]}" = - ] || printf '%s\t%s\n' "${keys[$i]}" "${refs[$i]}"
+done | jq -Rn --arg source "$source" --arg generated_at "$(date -u +%FT%TZ)" \
+  --arg repository "$GITHUB_REPOSITORY" --arg workflow "$GITHUB_WORKFLOW" \
+  --arg run_id "$GITHUB_RUN_ID" --arg sha "$GITHUB_SHA" '{
+    schema: 1, source: $source, generated_at: $generated_at,
+    run: {repository: $repository, workflow: $workflow, run_id: $run_id, sha: $sha},
+    images: (reduce (inputs | split("\t")) as [$k, $r] ({}; .[$k].refs += [$r]) | map_values(.refs |= unique))
+  }' >"$manifest" || die "cannot build the manifest" 3
+put_once "$manifest" "runs/$date/$source/$run_id/manifest.json"
+
+[ "$failures" -eq 0 ] || exit 3

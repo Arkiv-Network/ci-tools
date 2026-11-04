@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""check-grype-ignores — lint grype ignore ledgers.
+
+Every rule under `ignore:` is scoped by a `vulnerability`, by a `package` mapping with a `location`
+(a glob) or a `name` (an anchored regex), or by both. A `package` takes only grype's keys (`name`,
+`version`, `language`, `type`, `location`, `upstream-name`), each a non-empty string; the other four
+narrow a rule but cannot scope one alone, and a location or name that matches everything is
+rejected. Every rule carries a non-empty `reason` and an `expires` date (YYYY-MM-DD) that is not in
+the past and at most 180 days ahead, so accepted risk is always explained and always comes back for
+review.
+
+    mise exec -- bin/check-grype-ignores .grype.yaml other/.grype.yaml
+
+Prints one line per offending rule. Exit 0 = every rule valid, 1 = at least one problem, 2 = usage.
+YAML is read through `yq -o=json`.
+"""
+
+import argparse
+import datetime
+import json
+import re
+import subprocess
+import sys
+
+MAX_DAYS = 180
+DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+PACKAGE_KEYS = ("name", "version", "language", "type", "location", "upstream-name")
+
+
+def text(value):
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def load(path):
+    """Parse one ledger to Python data; raises ValueError with yq's message on failure."""
+    result = subprocess.run(["yq", "-o=json", ".", path], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or f"yq exited {result.returncode}")
+    return json.loads(result.stdout or "null")
+
+
+def rule_problems(rule, today):
+    if not isinstance(rule, dict):
+        return ["not a mapping"]
+    problems = []
+    package = rule.get("package")
+    if package is not None:
+        problems += package_problems(package, scoped=bool(text(rule.get("vulnerability"))))
+    elif not text(rule.get("vulnerability")):
+        problems.append("missing vulnerability or package")
+    if not isinstance(rule.get("reason"), str) or not rule["reason"].strip():
+        problems.append("missing reason")
+    expires = rule.get("expires")
+    if not isinstance(expires, str) or not DATE.match(expires):
+        problems.append("expires must be YYYY-MM-DD")
+    else:
+        try:
+            date = datetime.date.fromisoformat(expires)
+        except ValueError:
+            problems.append(f"expires {expires} is not a valid date")
+        else:
+            if date < today:
+                problems.append(f"expired on {expires}")
+            elif (date - today).days > MAX_DAYS:
+                problems.append(f"expires {expires} is more than {MAX_DAYS} days ahead")
+    return problems
+
+
+def package_problems(package, scoped):
+    """Problems with a rule's `package`; `scoped` = the rule also names a vulnerability."""
+    if not isinstance(package, dict):
+        return ["package is not a mapping"]
+    problems = []
+    for key, value in package.items():
+        if key not in PACKAGE_KEYS:
+            problems.append(f"unknown package key: {key}")
+        elif not text(value):
+            problems.append(f"package {key} must be a non-empty string")
+    location, name = text(package.get("location")), text(package.get("name"))
+    if location and set(location) <= set("/*?"):
+        problems.append("package location matches everything")
+    if name in (".*", ".+"):
+        problems.append("package name matches everything")
+    if not scoped and not location and not name:
+        problems.append("package needs a location or a name")
+    return problems
+
+
+def label(i, rule):
+    if not isinstance(rule, dict):
+        return f"ignore[{i}]"
+    if text(rule.get("vulnerability")):
+        return f"ignore[{i}] ({rule['vulnerability']})"
+    package = rule.get("package") if isinstance(rule.get("package"), dict) else {}
+    for key in ("location", "name"):
+        if text(package.get(key)):
+            return f"ignore[{i}] (package {key}={package[key]})"
+    return f"ignore[{i}]"
+
+
+def file_problems(path, today):
+    try:
+        data = load(path)
+    except ValueError as e:
+        return [f"{path}: cannot read: {e}"]
+    if data is None:
+        return []
+    if not isinstance(data, dict):
+        return [f"{path}: top level is not a mapping"]
+    rules = data.get("ignore")
+    if rules is None:
+        return []
+    if not isinstance(rules, list):
+        return [f"{path}: ignore is not a list"]
+    out = []
+    for i, rule in enumerate(rules):
+        problems = rule_problems(rule, today)
+        if problems:
+            out.append(f"{path}: {label(i, rule)}: {'; '.join(problems)}")
+    return out
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Lint grype ignore ledgers.")
+    parser.add_argument("files", nargs="+", metavar="FILE")
+    args = parser.parse_args()
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    problems = [p for f in args.files for p in file_problems(f, today)]
+    for p in problems:
+        print(p)
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
