@@ -110,6 +110,24 @@ only of `/`, `*` and `?`, or a `name` of `.*` or `.+`.
 
 Lint a ledger with `mise exec -- bin/check-grype-ignores .grype.yaml`.
 
+## Tool installation
+
+The action installs this repository's pinned tools with
+[mise-action](https://github.com/jdx/mise-action) on every run and keeps no cache.
+
+`mise-action` caches the whole mise data directory under a key derived from the caller's workspace.
+In a job that has already installed its own tools, that cache duplicates them, and restoring it
+takes longer than installing: 5 s to install against 14 s to restore a 468 MB cache, measured on
+2026-11-06 in a caller with twenty tools of its own. The key also does not follow this repository's
+tool versions, so after a caller moves its pin the cache could restore stale tools. A caller that
+wants caching sets it up in its own job.
+
+The uncached install is authenticated: `mise-action`'s `github_token` input defaults to the job's
+automatic token, and the action hands it to mise before installing. Release lookups and attestation
+checks therefore count against the repository's authenticated rate limit, not the anonymous limit
+shared by everything on the runner's IP address. No caller input is needed, and a read-only token is
+enough.
+
 ## Running it locally
 
 The action is a thin wrapper around `bin/sbom-scan`, which runs the same way from a checkout of this

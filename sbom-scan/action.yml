@@ -78,6 +78,8 @@ runs:
         # a release's assets are published.
         version: 2026.9.2
         working_directory: ${{ github.action_path }}/..
+        # The caller's job owns the mise cache; see docs/sbom-scan.md § Tool installation.
+        cache: false
 
     - id: scan
       shell: bash

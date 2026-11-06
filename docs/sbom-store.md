@@ -4,6 +4,9 @@ The `sbom-store` action and `bin/sbom-store`. Inputs, outputs and a calling exam
 [README](../README.md#sbom-store); the bucket layout, retention, lock and manifest schema are in
 [`storage.md`](storage.md).
 
+The action installs its tools the same way as `sbom-scan`, without a cache; see
+[Tool installation](sbom-scan.md#tool-installation).
+
 ## Lines
 
 Each line is `<key> <ref|-> <source>`: `key` is `sha256:<hex>` (an image digest, or the digest of
