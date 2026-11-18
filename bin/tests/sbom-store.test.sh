@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fixture tests for bin/sbom-store, offline. curl is a shim that logs each request's method, URL,
-# arguments and -K config, keeps every uploaded body, and answers with the HTTP status the test's rules give for
-# that method and URL (default: HEAD 404, PUT 200).
+# arguments and -K config, keeps every uploaded body, serves GET bodies from $BUCKET, and answers with
+# the HTTP status the test's rules give for that method and URL (default: HEAD and GET 404, PUT 200).
 #
 # Needs jq and zstd on PATH: run under `mise exec --`.
 #
@@ -24,12 +24,13 @@ mkdir -p "$BIN"
 cat >"$BIN/curl" <<'FAKE'
 #!/usr/bin/env bash
 echo "args $*" >>"$LOG"
-method=GET body=""
+method=GET body="" out=/dev/null
 args=("$@")
 for i in "${!args[@]}"; do
   case "${args[$i]}" in
     -I) method=HEAD ;;
     -T) method=PUT body="${args[$((i + 1))]}" ;;
+    -o) out="${args[$((i + 1))]}" ;;
     -K) echo "config $(cat "${args[$((i + 1))]}")" >>"$LOG" ;;
   esac
 done
@@ -43,6 +44,9 @@ done <"$RULES"
 if [ "$method" = PUT ] && [ "$code" = 200 ]; then
   dest="$STORE/${url#*/sbom-bucket/}"
   mkdir -p "${dest%/*}" && cp "$body" "$dest"
+fi
+if [ "$method" = GET ]; then
+  if [ "$code" = 200 ]; then cp "$BUCKET/${url#*/sbom-bucket/}" "$out"; else echo '<Error/>' >"$out"; fi
 fi
 printf '%s' "$code"
 FAKE
@@ -72,7 +76,7 @@ jq -n --arg a "$SA" --arg b "$SB" --arg d "$SD" --arg sa "sha256-${A#sha256:}" '
 
 KEY_ID=AKIDtestkeyid0001 SECRET=s3cr3t-value-never-printed
 DATE="$(date -u +%F)" RUN=runs/"$(date -u +%F)"/my-app/42-2
-export LOG="$TMP/log" RULES="$TMP/rules" STORE="$TMP/store"
+export LOG="$TMP/log" RULES="$TMP/rules" STORE="$TMP/store" BUCKET="$TMP/bucket"
 GH=(GITHUB_REPOSITORY=example-org/my-app GITHUB_WORKFLOW=SBOM GITHUB_RUN_ID=42 GITHUB_RUN_ATTEMPT=2
   GITHUB_SHA=0123abc)
 R2=(R2_SBOM_ENDPOINT=https://acct.eu.r2.example.com/ R2_SBOM_BUCKET=sbom-bucket
@@ -82,7 +86,7 @@ EXTRA=()
 run() {
   local input="$1"; shift
   : >"$LOG"; rm -rf "$STORE"
-  OUT="$(printf '%s' "$input" | env -i PATH="$BIN:$PATH" HOME="$HOME" LOG="$LOG" RULES="$RULES" STORE="$STORE" \
+  OUT="$(printf '%s' "$input" | env -i PATH="$BIN:$PATH" HOME="$HOME" LOG="$LOG" RULES="$RULES" STORE="$STORE" BUCKET="$BUCKET" \
     ${R2[@]+"${R2[@]}"} ${GH[@]+"${GH[@]}"} ${EXTRA[@]+"${EXTRA[@]}"} "$HERE/../sbom-store" "$@" 2>&1)"
 }
 rules() { printf '%s\n' "$@" >"$RULES"; }
@@ -198,6 +202,106 @@ run "notakey - $SA" missing
 [ $? -eq 2 ] && [ ! -s "$LOG" ] && ok "a malformed key exits 2" || bad "malformed key: $OUT"
 run "$A ghcr.io/x/a:1" missing
 [ $? -eq 2 ] && ok "a line without a source exits 2" || bad "short line: $OUT"
+
+# 8) get: a key with both SBOMs is fetched once and its lines point at the decompressed syft SBOM;
+# B has only the CycloneDX one, C neither, D the syft one only; order is input order
+mkdir -p "$BUCKET/sbom"
+for k in "$A" "$D"; do
+  echo "{\"stored\":\"$k\"}" | zstd -q -c >"$BUCKET/sbom/sha256%3A${k#sha256:}.syft.json.zst"
+done
+GET_DIR="$TMP/work/sbom-get"
+rules "HEAD sha256%3A${A#sha256:}.cdx 200" "GET sha256%3A${A#sha256:}.syft 200" \
+  "HEAD sha256%3A${B#sha256:}.cdx 200" "GET sha256%3A${D#sha256:}.syft 200"
+saved_gh=("${GH[@]}") GH=()
+run "$B ghcr.io/x/b:1 $SB
+$A ghcr.io/x/a:2 $SA
+
+$C ghcr.io/x/c:1 $SC
+$A ghcr.io/x/a:1 $SA
+$D - $SD
+" get --out "$GET_DIR"
+rc=$?
+GH=("${saved_gh[@]}")
+[ $rc -eq 0 ] && [ "$OUT" = "$B ghcr.io/x/b:1 $SB
+$A ghcr.io/x/a:2 sbom:$GET_DIR/sha256-${A#sha256:}.syft.json
+$C ghcr.io/x/c:1 $SC
+$A ghcr.io/x/a:1 sbom:$GET_DIR/sha256-${A#sha256:}.syft.json
+$D - $SD" ] && ok "get rewrites the stored key's lines, keeps the rest, in input order, without GITHUB_*" \
+  || bad "get: rc=$rc $OUT"
+[ "$(cat "$GET_DIR/sha256-${A#sha256:}.syft.json")" = "{\"stored\":\"$A\"}" ] \
+  && [ "$(find "$GET_DIR" -type f | wc -l)" -eq 1 ] \
+  && ok "get creates DIR and leaves only the stored key's decompressed syft SBOM" \
+  || bad "get files: $(find "$GET_DIR" -type f)"
+[ "$(grep -c "^HEAD .*/sbom/sha256%3A${A#sha256:}\.cdx\.json\.zst$" "$LOG")" -eq 1 ] \
+  && [ "$(grep -c "^GET .*/sbom/sha256%3A${A#sha256:}\.syft\.json\.zst$" "$LOG")" -eq 1 ] \
+  && grep -q "^GET .*/sbom/sha256%3A${B#sha256:}\.syft\.json\.zst$" "$LOG" \
+  && ! grep -q "^GET .*\(${C#sha256:}\|${D#sha256:}\)" "$LOG" \
+  && [ "$(grep -cE '^(HEAD|GET) ' "$LOG")" -eq 6 ] && ! grep -q '^PUT ' "$LOG" \
+  && ok "cdx HEAD first, syft GET only when cdx is present, once per key, no PUT" \
+  || bad "get requests: $(grep -v '^args\|^config' "$LOG")"
+grep -q -- "^args .*--aws-sigv4 aws:amz:auto:s3 .*-K /dev/fd/" "$LOG" \
+  && [ "$(grep -c '^config ' "$LOG")" -eq "$(grep -c '^args ' "$LOG")" ] \
+  && ! grep '^args ' "$LOG" | grep -qF -e "$KEY_ID" -e "$SECRET" && no_secret \
+  && ok "get signs every request, the credential only through -K" || bad "get curl args: $(head -2 "$LOG")"
+
+# 9) get fails on an unexpected status or an undecompressable body, leaving no file for the key
+for case_ in "HEAD sha256%3A${A#sha256:}.cdx 500|HEAD sbom/$A.cdx.json.zst: HTTP 500" \
+  "HEAD sha256%3A${A#sha256:}.cdx 200;GET sha256%3A${A#sha256:}.syft 403|GET sbom/$A.syft.json.zst: HTTP 403" \
+  "HEAD sha256%3A${C#sha256:}.cdx 200;GET sha256%3A${C#sha256:}.syft 200|cannot decompress sbom/$C.syft.json.zst"; do
+  IFS=';' read -ra r <<<"${case_%%|*}"
+  rules "${r[@]}"
+  echo 'not zstd' >"$BUCKET/sbom/sha256%3A${C#sha256:}.syft.json.zst"
+  rm -rf "$GET_DIR"
+  run "$A ghcr.io/x/a:1 $SA
+$C ghcr.io/x/c:1 $SC" get --out "$GET_DIR"
+  rc=$?
+  [ $rc -eq 3 ] && grep -qF "${case_#*|}" <<<"$OUT" && [ -z "$(find "$GET_DIR" -type f)" ] && no_secret \
+    && ok "get exits 3 on: ${case_#*|}" || bad "get failure '${case_#*|}': rc=$rc $OUT $(find "$GET_DIR" -type f)"
+done
+
+# 10) put: an sbom: source stores its grype report only
+SS="sbom:sbom-get/sha256-${A#sha256:}.syft.json" SSLUG="sbom-sbom-get-sha256-${A#sha256:}.syft.json"
+SCAN2="$TMP/scan2"
+mkdir -p "$SCAN2/sbom" "$SCAN2/reports"
+cp "$SCAN/sbom/sha256-${A#sha256:}.syft.json" "$SCAN2/sbom/$SSLUG"
+echo '{"grype":"rematch"}' >"$SCAN2/reports/$SSLUG.grype.json"
+jq -n --arg s "$SS" --arg sl "$SSLUG" '{sources: [{source: $s, slug: $sl}]}' >"$SCAN2/summary.json"
+rules
+run "$A ghcr.io/x/a:1 $SS" put --scan-dir "$SCAN2" --source cluster-a
+rc=$?
+RUN2=runs/"$DATE"/cluster-a/42-2
+[ $rc -eq 0 ] && [ "$OUT" = "stored reports/$DATE/cluster-a/42-2/$A.grype.json.zst
+stored $RUN2/manifest.json" ] && ! grep -qE '^(HEAD|PUT) .*/sbom/' "$LOG" \
+  && [ "$(zstd -dc "$STORE/reports/$DATE/cluster-a/42-2/sha256%3A${A#sha256:}.grype.json.zst")" = '{"grype":"rematch"}' ] \
+  && ok "put stores an sbom: source's report alone" || bad "put sbom: source: rc=$rc $OUT $(grep -E '^(HEAD|PUT) ' "$LOG")"
+
+# 11) put --meta adds sorted, unique namespaces and nodes to the listed images, ignores unknown keys
+META="$TMP/meta.json"
+jq -n --arg a "$A" --arg c "$C" --arg e "sha256:$(printf 'e%.0s' $(seq 64))" '{
+  ($a): {namespaces: ["ns-b", "ns-a", "ns-b"], nodes: ["node-2", "node-1", "node-2"]},
+  ($c): {namespaces: ["ns-c"], nodes: []}, ($e): {namespaces: ["ns-e"], nodes: ["node-e"]}}' >"$META"
+rules
+run "$LINES" put --scan-dir "$TMP/empty" --source my-app --meta "$META"
+rc=$?
+jq -e --arg a "$A" --arg b "$B" --arg c "$C" '.images == {
+  ($a): {refs: ["ghcr.io/x/a:1", "ghcr.io/x/a:2"], namespaces: ["ns-a", "ns-b"], nodes: ["node-1", "node-2"]},
+  ($b): {refs: ["ghcr.io/x/b:1"]}, ($c): {refs: ["ghcr.io/x/c:1"], namespaces: ["ns-c"], nodes: []}}' \
+  "$STORE/$RUN/manifest.json" >/dev/null && [ $rc -eq 0 ] \
+  && ok "put --meta adds sorted unique namespaces and nodes, only to images in the manifest" \
+  || bad "put --meta: rc=$rc $OUT $(cat "$STORE/$RUN/manifest.json")"
+for bad_meta in "$TMP/no-such-meta.json" '[]' '{"x": {"nodes": "node-1"}}' '{"x": {"namespaces": [1]}}' '{} {}'; do
+  f="$bad_meta"
+  [[ "$bad_meta" == /* ]] || { f="$TMP/bad-meta.json"; printf '%s' "$bad_meta" >"$f"; }
+  run "$LINES" put --scan-dir "$SCAN" --source my-app --meta "$f"
+  rc=$?
+  [ $rc -eq 2 ] && [ ! -s "$LOG" ] && grep -qF -- '--meta' <<<"$OUT" \
+    && ok "a bad --meta exits 2 before any request: $bad_meta" || bad "bad --meta '$bad_meta': rc=$rc $OUT"
+done
+
+# 12) get usage errors exit 2 before any request
+run "$LINES" get;                                    [ $? -eq 2 ] && [ ! -s "$LOG" ] && ok "get without --out exits 2" || bad "get no --out: $OUT"
+run "$LINES" get --out "$GET_DIR" extra;             [ $? -eq 2 ] && [ ! -s "$LOG" ] && ok "get with an extra argument exits 2" || bad "get extra: $OUT"
+run "$LINES" get --out "$TMP/a dir";                 [ $? -eq 2 ] && [ ! -s "$LOG" ] && ok "a --out with whitespace exits 2" || bad "get space: $OUT"
 
 echo "---"
 echo "$pass passed, $fail failed"
