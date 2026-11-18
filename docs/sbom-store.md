@@ -38,8 +38,9 @@ zstd-compressed `sbom/<slug>.cdx.json`, `sbom/<slug>.syft.json` and `reports/<sl
 `sbom/<key>.cdx.json.zst`, `sbom/<key>.syft.json.zst` and
 `reports/<date>/<source>/<run-id>/<key>.grype.json.zst`. A line whose source was not scanned (its
 SBOM was already stored) stores nothing, and a `scan-dir` without `summary.json` stores no objects.
-A line whose source starts with `sbom:` — an SBOM `get` fetched from the bucket — stores only its
-grype report: its SBOMs are already there.
+A line whose source starts with `sbom:` stores only its grype report, never its SBOM: that is right
+for an SBOM `get` fetched from the bucket, and means a ready-made SBOM the bucket does not hold is
+not stored.
 
 Then it writes `runs/<date>/<source>/<run-id>/manifest.json` (schema v1, uncompressed): every line
 whose ref is not `-`, its refs grouped by key and sorted. `<date>` is the UTC date, `<run-id>`

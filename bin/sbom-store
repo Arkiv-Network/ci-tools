@@ -15,27 +15,28 @@
 # get: HEAD sbom/<key>.cdx.json.zst, then GET sbom/<key>.syft.json.zst, per key. A key with both
 # has its syft SBOM decompressed to DIR/sha256-<hex>.syft.json and its lines printed with the source
 # replaced by sbom:DIR/sha256-<hex>.syft.json; a key lacking either (404) has its lines printed
-# unchanged. Output order is input order.
+# unchanged and no file in DIR. Output order is input order.
 #
 # put: for each line whose source is in DIR/summary.json without an error, zstd-compresses that
-# slug's sbom/<slug>.cdx.json, sbom/<slug>.syft.json and reports/<slug>.grype.json and stores them as
-# sbom/<key>.cdx.json.zst, sbom/<key>.syft.json.zst and
-# reports/<date>/<NAME>/<run-id>/<key>.grype.json.zst; an sbom: source stores only its report, its
-# SBOM being already in the bucket. A source absent from summary.json was not scanned and stores
-# nothing. Then writes runs/<date>/<NAME>/<run-id>/manifest.json (schema v1): every line whose ref is
-# not -, refs grouped by key; with --meta, FILE is `{"<key>": {"namespaces": […], "nodes": […]}}` and
-# each listed image gains those arrays, sorted and unique. Each object is put-once: HEAD; on 404 PUT;
-# 200 or a 409 on PUT is present. Prints `stored|present|failed <key path>` per object, after trying
-# all. <date> is the UTC date, <run-id> $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT; the manifest's run comes
-# from GITHUB_REPOSITORY, GITHUB_WORKFLOW, GITHUB_RUN_ID and GITHUB_SHA.
+# slug's sbom/<slug>.cdx.json, sbom/<slug>.syft.json and reports/<slug>.grype.json and stores them
+# as sbom/<key>.cdx.json.zst, sbom/<key>.syft.json.zst and
+# reports/<date>/<NAME>/<run-id>/<key>.grype.json.zst. An sbom: source stores only its report, never
+# its SBOM, whether or not the bucket holds it. A source absent from summary.json was not scanned
+# and stores nothing. Then writes runs/<date>/<NAME>/<run-id>/manifest.json (schema v1): every line
+# whose ref is not -, refs grouped by key; with --meta, FILE is `{"<key>": {"namespaces": […],
+# "nodes": […]}}` and each listed image gains those arrays, sorted and unique. Each object is
+# put-once: HEAD; on 404 PUT; 200 or a 409 on PUT is present. Prints `stored|present|failed <key
+# path>` per object, after trying all. <date> is the UTC date, <run-id>
+# $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT; the manifest's run comes from GITHUB_REPOSITORY,
+# GITHUB_WORKFLOW, GITHUB_RUN_ID and GITHUB_SHA.
 #
 # Bucket from R2_SBOM_ENDPOINT, R2_SBOM_BUCKET, R2_SBOM_ACCESS_KEY_ID and R2_SBOM_SECRET_ACCESS_KEY,
 # requests signed by curl --aws-sigv4; the credential reaches curl through a config on a pipe, never
 # argv, and is never printed.
 #
 # Exit 0 = done, 2 = usage or missing environment, 3 = a request returned an unexpected status
-# (missing, get), a fetched SBOM did not decompress (get) or an object failed (put). Needs curl and
-# zstd on PATH, and jq for put.
+# (missing, get), a fetched SBOM did not decompress (get) or an object failed (put). Needs curl on
+# PATH; get also zstd, put also zstd and jq.
 set -uo pipefail
 
 usage() { sed -n '5,7p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
@@ -128,7 +129,8 @@ for t in "${tools[@]}"; do
 done
 if [ -n "$meta" ]; then
   jq -se 'length == 1 and (.[0] | type == "object" and all(.[]; type == "object"
-      and all((.namespaces // []), (.nodes // []); type == "array" and all(.[]; type == "string"))))' \
+      and all((.namespaces, .nodes) | select(. != null);
+        type == "array" and all(.[]; type == "string"))))' \
     "$meta" >/dev/null 2>&1 || die "--meta must be a JSON object of {namespaces, nodes} string arrays: $meta"
 fi
 TMP="$(mktemp -d)" || die "cannot create a temporary directory" 3
@@ -142,6 +144,7 @@ if [ "$mode" = get ]; then
     if [ -z "${fetched[$k]:-}" ]; then
       fetched[$k]=no
       sbom="$out_dir/sha256-${k#sha256:}.syft.json" z="$TMP/${k#sha256:}.syft.json.zst"
+      rm -f "$sbom" || die "cannot remove $sbom" 3
       code="$(http HEAD "sbom/$k.cdx.json.zst")"
       case "$code" in
         404) ;;
@@ -150,7 +153,8 @@ if [ "$mode" = get ]; then
           case "$code" in
             404) ;;
             200)
-              zstd -q -d -c "$z" >"$sbom" || { rm -f "$sbom"; die "cannot decompress sbom/$k.syft.json.zst" 3; }
+              zstd -q -d -c "$z" >"${z%.zst}" || die "cannot decompress sbom/$k.syft.json.zst" 3
+              mv "${z%.zst}" "$sbom" || die "cannot write $sbom" 3
               fetched[$k]=yes
               ;;
             *) die "GET sbom/$k.syft.json.zst: HTTP $code" 3 ;;

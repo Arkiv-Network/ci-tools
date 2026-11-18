@@ -210,6 +210,8 @@ for k in "$A" "$D"; do
   echo "{\"stored\":\"$k\"}" | zstd -q -c >"$BUCKET/sbom/sha256%3A${k#sha256:}.syft.json.zst"
 done
 GET_DIR="$TMP/work/sbom-get"
+mkdir -p "$GET_DIR"
+for k in "$B" "$C"; do echo stale >"$GET_DIR/sha256-${k#sha256:}.syft.json"; done
 rules "HEAD sha256%3A${A#sha256:}.cdx 200" "GET sha256%3A${A#sha256:}.syft 200" \
   "HEAD sha256%3A${B#sha256:}.cdx 200" "GET sha256%3A${D#sha256:}.syft 200"
 saved_gh=("${GH[@]}") GH=()
@@ -230,7 +232,7 @@ $D - $SD" ] && ok "get rewrites the stored key's lines, keeps the rest, in input
   || bad "get: rc=$rc $OUT"
 [ "$(cat "$GET_DIR/sha256-${A#sha256:}.syft.json")" = "{\"stored\":\"$A\"}" ] \
   && [ "$(find "$GET_DIR" -type f | wc -l)" -eq 1 ] \
-  && ok "get creates DIR and leaves only the stored key's decompressed syft SBOM" \
+  && ok "get leaves only the stored key's decompressed syft SBOM, removing stale files of absent keys" \
   || bad "get files: $(find "$GET_DIR" -type f)"
 [ "$(grep -c "^HEAD .*/sbom/sha256%3A${A#sha256:}\.cdx\.json\.zst$" "$LOG")" -eq 1 ] \
   && [ "$(grep -c "^GET .*/sbom/sha256%3A${A#sha256:}\.syft\.json\.zst$" "$LOG")" -eq 1 ] \
@@ -289,7 +291,8 @@ jq -e --arg a "$A" --arg b "$B" --arg c "$C" '.images == {
   "$STORE/$RUN/manifest.json" >/dev/null && [ $rc -eq 0 ] \
   && ok "put --meta adds sorted unique namespaces and nodes, only to images in the manifest" \
   || bad "put --meta: rc=$rc $OUT $(cat "$STORE/$RUN/manifest.json")"
-for bad_meta in "$TMP/no-such-meta.json" '[]' '{"x": {"nodes": "node-1"}}' '{"x": {"namespaces": [1]}}' '{} {}'; do
+for bad_meta in "$TMP/no-such-meta.json" '[]' '{"x": {"nodes": "node-1"}}' '{"x": {"namespaces": [1]}}' '{} {}' \
+  "{\"$A\": {\"namespaces\": false}}"; do
   f="$bad_meta"
   [[ "$bad_meta" == /* ]] || { f="$TMP/bad-meta.json"; printf '%s' "$bad_meta" >"$f"; }
   run "$LINES" put --scan-dir "$SCAN" --source my-app --meta "$f"
@@ -297,6 +300,30 @@ for bad_meta in "$TMP/no-such-meta.json" '[]' '{"x": {"nodes": "node-1"}}' '{"x"
   [ $rc -eq 2 ] && [ ! -s "$LOG" ] && grep -qF -- '--meta' <<<"$OUT" \
     && ok "a bad --meta exits 2 before any request: $bad_meta" || bad "bad --meta '$bad_meta': rc=$rc $OUT"
 done
+
+# 11b) the cluster flow: an sbom: source with a --meta entry stores the report alone, and the
+# manifest carries the image's namespaces and nodes
+rules
+run "$A ghcr.io/x/a:1 $SS" put --scan-dir "$SCAN2" --source cluster-a --meta "$META"
+rc=$?
+[ $rc -eq 0 ] && [ "$OUT" = "stored reports/$DATE/cluster-a/42-2/$A.grype.json.zst
+stored $RUN2/manifest.json" ] && ! grep -qE '^(HEAD|PUT) .*/sbom/' "$LOG" \
+  && jq -e --arg a "$A" '.images == {($a): {refs: ["ghcr.io/x/a:1"], namespaces: ["ns-a", "ns-b"],
+    nodes: ["node-1", "node-2"]}}' "$STORE/$RUN2/manifest.json" >/dev/null \
+  && ok "put of an sbom: source with --meta stores the report alone and the image's namespaces and nodes" \
+  || bad "cluster flow: rc=$rc $OUT $(cat "$STORE/$RUN2/manifest.json" 2>/dev/null)"
+
+# 11c) get with a relative --out prints the path as given
+rules "HEAD sha256%3A${A#sha256:}.cdx 200" "GET sha256%3A${A#sha256:}.syft 200"
+mkdir -p "$TMP/rel"
+pushd "$TMP/rel" >/dev/null || exit 2
+run "$A ghcr.io/x/a:1 $SA" get --out sbom-get
+rc=$?
+popd >/dev/null || exit 2
+[ $rc -eq 0 ] && [ "$OUT" = "$A ghcr.io/x/a:1 sbom:sbom-get/sha256-${A#sha256:}.syft.json" ] \
+  && [ "$(cat "$TMP/rel/sbom-get/sha256-${A#sha256:}.syft.json")" = "{\"stored\":\"$A\"}" ] \
+  && ok "get with a relative --out writes and prints sbom:<relative>/sha256-<hex>.syft.json" \
+  || bad "relative --out: rc=$rc $OUT"
 
 # 12) get usage errors exit 2 before any request
 run "$LINES" get;                                    [ $? -eq 2 ] && [ ! -s "$LOG" ] && ok "get without --out exits 2" || bad "get no --out: $OUT"
