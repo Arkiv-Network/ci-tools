@@ -84,8 +84,9 @@ private half the caller's Actions secret. Fork PRs get no secrets, so there the 
 
 ## sbom-store
 
-Stores SBOMs, grype reports and a run manifest in the SBOM bucket put-once, and lists the SBOMs the
-bucket lacks, so only those are scanned. The job uses a GitHub Environment restricted to `main`:
+Stores SBOMs, grype reports and a run manifest in the SBOM bucket put-once, lists the SBOMs the
+bucket lacks, so only those are scanned, and fetches the ones it holds, so grype re-matches them
+without pulling the image. The job uses a GitHub Environment restricted to `main`:
 
 ```yaml
     environment: sbom-writer
@@ -105,13 +106,34 @@ bucket lacks, so only those are scanned. The job uses a GitHub Environment restr
 
 | input | default | meaning |
 |---|---|---|
-| `mode` | required | `missing` or `put` |
+| `mode` | required | `missing`, `get` or `put` |
 | `lines` | required | one `<key> <ref\|-> <source>` per line: `sha256:<hex>`, the image ref or `-`, the `sbom-scan` source |
 | `scan-dir` | `sbom-scan` | `put`: the `sbom-scan` output directory |
 | `source` | `` | `put`: the run's source name — the repository for a builder, the cluster for a cluster scan |
+| `meta` | `` | `put`: a JSON file `{"<key>": {"namespaces": […], "nodes": […]}}` added to the manifest's images; empty = none |
+| `out-dir` | `sbom-get` | `get`: where the fetched syft SBOMs land |
 
-Output `lines` (`missing`): the input lines whose SBOM is absent from the bucket.
-Bucket contract: [`docs/storage.md`](docs/storage.md). `missing`, `put`, exit codes: [`docs/sbom-store.md`](docs/sbom-store.md).
+| output | meaning |
+|---|---|
+| `lines` | `missing`: the input lines whose SBOM is absent from the bucket; `get`: every input line, its source `sbom:<out-dir>/sha256-<hex>.syft.json` when the bucket holds the key's SBOMs |
+
+A cluster run re-matches the SBOMs the bucket holds and scans only the rest, then stores each
+report, the SBOMs of what was scanned, and where each image runs:
+
+```yaml
+      - id: get
+        uses: Arkiv-Network/ci-tools/sbom-store@<commit sha>
+        with: {mode: get, lines: "${{ steps.inventory.outputs.lines }}"}
+      # sbom-scan with fail: false over the third field of each line of steps.get.outputs.lines, then:
+      - uses: Arkiv-Network/ci-tools/sbom-store@<commit sha>
+        with:
+          mode: put
+          source: cluster-a
+          lines: ${{ steps.get.outputs.lines }}
+          meta: inventory/meta.json
+```
+
+Bucket contract: [`docs/storage.md`](docs/storage.md). `missing`, `get`, `put`, exit codes: [`docs/sbom-store.md`](docs/sbom-store.md).
 
 ## Running locally
 
@@ -119,6 +141,7 @@ Bucket contract: [`docs/storage.md`](docs/storage.md). `missing`, `put`, exit co
 mise install
 mise exec -- bin/sbom-scan [--out DIR] [--fail-on SEV] [--ignore FILE]… [--no-fail] SOURCE…
 mise exec -- bin/sbom-store missing <LINES
+mise exec -- bin/sbom-store get --out DIR <LINES
 mise exec -- bash bin/tests/<name>.test.sh
 ```
 

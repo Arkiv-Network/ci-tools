@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# sbom-store — find which SBOMs the SBOM bucket lacks, and store SBOMs, grype reports and the run
-# manifest put-once.
+# sbom-store — find which SBOMs the SBOM bucket lacks, fetch the ones it holds, and store SBOMs, grype
+# reports and the run manifest put-once.
 #
 #   bin/sbom-store missing <LINES
-#   bin/sbom-store put --scan-dir DIR --source NAME <LINES
+#   bin/sbom-store get --out DIR <LINES
+#   bin/sbom-store put --scan-dir DIR --source NAME [--meta FILE] <LINES
 #
 # LINES: one `<key> <ref|-> <source>` per line on stdin; key = sha256:<hex>, ref = the image ref or
 # - (not an image), source = the sbom-scan source the key was scanned from. Blank lines are skipped.
@@ -11,37 +12,53 @@
 # missing: HEAD sbom/<key>.syft.json.zst, then sbom/<key>.cdx.json.zst, per key; prints the lines
 # whose key lacks either (404), so a partly stored key is scanned and stored again.
 #
+# get: HEAD sbom/<key>.cdx.json.zst, then GET sbom/<key>.syft.json.zst, per key. A key with both
+# has its syft SBOM decompressed to DIR/sha256-<hex>.syft.json and its lines printed with the source
+# replaced by sbom:DIR/sha256-<hex>.syft.json; a key lacking either (404) has its lines printed
+# unchanged and no file in DIR. Output order is input order.
+#
 # put: for each line whose source is in DIR/summary.json without an error, zstd-compresses that
-# slug's sbom/<slug>.cdx.json, sbom/<slug>.syft.json and reports/<slug>.grype.json and stores them as
-# sbom/<key>.cdx.json.zst, sbom/<key>.syft.json.zst and
-# reports/<date>/<NAME>/<run-id>/<key>.grype.json.zst. A source absent from summary.json was not
-# scanned and stores nothing. Then writes runs/<date>/<NAME>/<run-id>/manifest.json (schema v1):
-# every line whose ref is not -, refs grouped by key. Each object is put-once: HEAD; on 404 PUT; 200
-# or a 409 on PUT is present. Prints `stored|present|failed <key path>` per object, after trying all.
-# <date> is the UTC date, <run-id> $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT; the manifest's run comes from
-# GITHUB_REPOSITORY, GITHUB_WORKFLOW, GITHUB_RUN_ID and GITHUB_SHA.
+# slug's sbom/<slug>.cdx.json, sbom/<slug>.syft.json and reports/<slug>.grype.json and stores them
+# as sbom/<key>.cdx.json.zst, sbom/<key>.syft.json.zst and
+# reports/<date>/<NAME>/<run-id>/<key>.grype.json.zst. An sbom: source stores only its report, never
+# its SBOM, whether or not the bucket holds it. A source absent from summary.json was not scanned
+# and stores nothing. Then writes runs/<date>/<NAME>/<run-id>/manifest.json (schema v1): every line
+# whose ref is not -, refs grouped by key; with --meta, FILE is `{"<key>": {"namespaces": […],
+# "nodes": […]}}` and each listed image gains those arrays, sorted and unique. Each object is
+# put-once: HEAD; on 404 PUT; 200 or a 409 on PUT is present. Prints `stored|present|failed <key
+# path>` per object, after trying all. <date> is the UTC date, <run-id>
+# $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT; the manifest's run comes from GITHUB_REPOSITORY,
+# GITHUB_WORKFLOW, GITHUB_RUN_ID and GITHUB_SHA.
 #
 # Bucket from R2_SBOM_ENDPOINT, R2_SBOM_BUCKET, R2_SBOM_ACCESS_KEY_ID and R2_SBOM_SECRET_ACCESS_KEY,
 # requests signed by curl --aws-sigv4; the credential reaches curl through a config on a pipe, never
 # argv, and is never printed.
 #
 # Exit 0 = done, 2 = usage or missing environment, 3 = a request returned an unexpected status
-# (missing) or an object failed (put). Needs curl, jq and zstd on PATH.
+# (missing, get), a fetched SBOM did not decompress (get) or an object failed (put). Needs curl on
+# PATH; get also zstd, put also zstd and jq.
 set -uo pipefail
 
-usage() { sed -n '5,6p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '5,7p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 die() { echo "sbom-store: $1" >&2; exit "${2:-2}"; }
 
 mode="${1:-}"
 [ $# -gt 0 ] && shift
-scan_dir="" source=""
+scan_dir="" source="" out_dir="" meta=""
 case "$mode" in
   missing) [ $# -eq 0 ] || usage ;;
+  get)
+    [ $# -eq 2 ] && [ "$1" = --out ] && [ -n "$2" ] || usage
+    out_dir="$2"
+    # DIR becomes part of a whitespace-separated line.
+    [[ "$out_dir" =~ [[:space:]] ]] && die "--out must not contain whitespace"
+    ;;
   put)
     while [ $# -gt 0 ]; do
       case "$1" in
         --scan-dir) [ $# -ge 2 ] || usage; scan_dir="$2"; shift 2 ;;
         --source) [ $# -ge 2 ] || usage; source="$2"; shift 2 ;;
+        --meta) [ $# -ge 2 ] || usage; meta="$2"; shift 2 ;;
         *) die "unknown argument: $1" ;;
       esac
     done
@@ -71,9 +88,12 @@ base="${R2_SBOM_ENDPOINT%/}/$R2_SBOM_BUCKET"
 user="$R2_SBOM_ACCESS_KEY_ID:$R2_SBOM_SECRET_ACCESS_KEY"
 user="${user//\\/\\\\}" user="${user//\"/\\\"}"
 
-# http METHOD KEY_PATH [FILE] — prints the HTTP status, 000 when no response came back.
+# http METHOD KEY_PATH [FILE] — PUT uploads FILE, GET writes the body to FILE; prints the HTTP
+# status, 000 when no response came back.
 http() {
-  local args=(-sS -o /dev/null -w '%{http_code}' --aws-sigv4 "aws:amz:auto:s3")
+  local body=/dev/null
+  [ "$1" = GET ] && body="$3"
+  local args=(-sS -o "$body" -w '%{http_code}' --aws-sigv4 "aws:amz:auto:s3")
   case "$1" in
     HEAD) args+=(-I) ;;
     PUT) args+=(-T "$3") ;;
@@ -102,11 +122,55 @@ if [ "$mode" = missing ]; then
   exit 0
 fi
 
-for t in jq zstd; do
+tools=(zstd)
+[ "$mode" = put ] && tools+=(jq)
+for t in "${tools[@]}"; do
   command -v "$t" >/dev/null || die "$t is not on PATH"
 done
+if [ -n "$meta" ]; then
+  jq -se 'length == 1 and (.[0] | type == "object" and all(.[]; type == "object"
+      and all((.namespaces, .nodes) | select(. != null);
+        type == "array" and all(.[]; type == "string"))))' \
+    "$meta" >/dev/null 2>&1 || die "--meta must be a JSON object of {namespaces, nodes} string arrays: $meta"
+fi
 TMP="$(mktemp -d)" || die "cannot create a temporary directory" 3
 trap 'rm -rf "$TMP"' EXIT
+
+if [ "$mode" = get ]; then
+  mkdir -p "$out_dir" || die "cannot create $out_dir" 3
+  declare -A fetched
+  for i in "${!lines[@]}"; do
+    k="${keys[$i]}"
+    if [ -z "${fetched[$k]:-}" ]; then
+      fetched[$k]=no
+      sbom="$out_dir/sha256-${k#sha256:}.syft.json" z="$TMP/${k#sha256:}.syft.json.zst"
+      rm -f "$sbom" || die "cannot remove $sbom" 3
+      code="$(http HEAD "sbom/$k.cdx.json.zst")"
+      case "$code" in
+        404) ;;
+        200)
+          code="$(http GET "sbom/$k.syft.json.zst" "$z")"
+          case "$code" in
+            404) ;;
+            200)
+              zstd -q -d -c "$z" >"${z%.zst}" || die "cannot decompress sbom/$k.syft.json.zst" 3
+              mv "${z%.zst}" "$sbom" || die "cannot write $sbom" 3
+              fetched[$k]=yes
+              ;;
+            *) die "GET sbom/$k.syft.json.zst: HTTP $code" 3 ;;
+          esac
+          ;;
+        *) die "HEAD sbom/$k.cdx.json.zst: HTTP $code" 3 ;;
+      esac
+    fi
+    if [ "${fetched[$k]}" = yes ]; then
+      echo "$k ${refs[$i]} sbom:$out_dir/sha256-${k#sha256:}.syft.json"
+    else
+      echo "${lines[$i]}"
+    fi
+  done
+  exit 0
+fi
 
 failures=0
 # put_once FILE KEY_PATH
@@ -139,8 +203,10 @@ for i in "${!lines[@]}"; do
   k="${keys[$i]}" sl="${slug[${srcs[$i]}]:-}"
   [ -n "$sl" ] && [ -z "${seen[$k]:-}" ] || continue
   seen[$k]=1
-  for pair in "sbom/$sl.cdx.json=sbom/$k.cdx.json.zst" "sbom/$sl.syft.json=sbom/$k.syft.json.zst" \
-    "reports/$sl.grype.json=reports/$date/$source/$run_id/$k.grype.json.zst"; do
+  pairs=("reports/$sl.grype.json=reports/$date/$source/$run_id/$k.grype.json.zst")
+  [[ "${srcs[$i]}" == sbom:* ]] \
+    || pairs=("sbom/$sl.cdx.json=sbom/$k.cdx.json.zst" "sbom/$sl.syft.json=sbom/$k.syft.json.zst" "${pairs[@]}")
+  for pair in "${pairs[@]}"; do
     from="$scan_dir/${pair%%=*}" to="${pair#*=}" z="$TMP/${pair#*=}"
     mkdir -p "${z%/*}"
     if zstd -q -c "$from" >"$z"; then
@@ -154,14 +220,19 @@ for i in "${!lines[@]}"; do
 done
 
 manifest="$TMP/manifest.json"
+meta_args=(--argjson meta '[{}]')
+[ -z "$meta" ] || meta_args=(--slurpfile meta "$meta")
 for i in "${!lines[@]}"; do
   [ "${refs[$i]}" = - ] || printf '%s\t%s\n' "${keys[$i]}" "${refs[$i]}"
 done | jq -Rn --arg source "$source" --arg generated_at "$(date -u +%FT%TZ)" \
   --arg repository "$GITHUB_REPOSITORY" --arg workflow "$GITHUB_WORKFLOW" \
-  --arg run_id "$GITHUB_RUN_ID" --arg sha "$GITHUB_SHA" '{
+  --arg run_id "$GITHUB_RUN_ID" --arg sha "$GITHUB_SHA" "${meta_args[@]}" '{
     schema: 1, source: $source, generated_at: $generated_at,
     run: {repository: $repository, workflow: $workflow, run_id: $run_id, sha: $sha},
-    images: (reduce (inputs | split("\t")) as [$k, $r] ({}; .[$k].refs += [$r]) | map_values(.refs |= unique))
+    images: (reduce (inputs | split("\t")) as [$k, $r] ({}; .[$k].refs += [$r]) | map_values(.refs |= unique)
+      | reduce ($meta[0] | to_entries[]) as {key: $k, value: $v} (.;
+          if has($k) then .[$k] += ($v | {namespaces, nodes} | with_entries(select(.value != null))
+            | map_values(unique)) else . end))
   }' >"$manifest" || die "cannot build the manifest" 3
 put_once "$manifest" "runs/$date/$source/$run_id/manifest.json"
 

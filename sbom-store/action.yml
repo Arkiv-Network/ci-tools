@@ -1,12 +1,15 @@
 name: sbom-store
 description: >-
-  Find which SBOMs the SBOM bucket lacks, or store the SBOMs and grype reports of an sbom-scan run
-  and the run manifest, put-once. Needs R2_SBOM_ENDPOINT, R2_SBOM_BUCKET, R2_SBOM_ACCESS_KEY_ID and
-  R2_SBOM_SECRET_ACCESS_KEY in the environment.
+  Find which SBOMs the SBOM bucket lacks, fetch the syft SBOMs it holds so grype can re-match them,
+  or store the SBOMs and grype reports of an sbom-scan run and the run manifest, put-once. Needs
+  R2_SBOM_ENDPOINT, R2_SBOM_BUCKET, R2_SBOM_ACCESS_KEY_ID and R2_SBOM_SECRET_ACCESS_KEY in the
+  environment.
 
 inputs:
   mode:
-    description: missing (print the lines whose SBOM is absent) or put (store and write the manifest).
+    description: >-
+      missing (print the lines whose SBOM is absent), get (fetch the stored syft SBOMs and print the
+      lines with their source pointing at them) or put (store and write the manifest).
     required: true
   lines:
     description: One `<key> <ref|-> <source>` per line; key = sha256:<hex>, ref = the image ref or - for a non-image.
@@ -17,10 +20,18 @@ inputs:
   source:
     description: put only; the run's source name in the manifest and the reports/ and runs/ keys.
     default: ""
+  meta:
+    description: put only; a JSON file of namespaces and nodes per key for the manifest, relative to the workspace; empty = none.
+    default: ""
+  out-dir:
+    description: get only; where the fetched syft SBOMs land, relative to the workspace.
+    default: sbom-get
 
 outputs:
   lines:
-    description: missing only; the input lines whose SBOM is absent from the bucket.
+    description: >-
+      missing: the input lines whose SBOM is absent from the bucket; get: every input line, its source
+      replaced by sbom:<out-dir>/<file> when the bucket holds the key's SBOMs.
     value: ${{ steps.store.outputs.lines }}
 
 runs:
@@ -42,19 +53,22 @@ runs:
         LINES: ${{ inputs.lines }}
         SCAN_DIR: ${{ inputs.scan-dir }}
         SOURCE: ${{ inputs.source }}
+        META: ${{ inputs.meta }}
+        OUT_DIR: ${{ inputs.out-dir }}
       # mise -C selects ci-tools' pinned tools but also changes directory; env -C returns to the
-      # workspace so a relative scan-dir resolves there.
+      # workspace so relative paths resolve there.
       run: |
         root="$GITHUB_ACTION_PATH/.."
         case "$MODE" in
           missing) args=(missing) ;;
-          put) args=(put --scan-dir "$SCAN_DIR" --source "$SOURCE") ;;
-          *) echo "sbom-store: mode must be missing or put" >&2; exit 2 ;;
+          get) args=(get --out "$OUT_DIR") ;;
+          put) args=(put --scan-dir "$SCAN_DIR" --source "$SOURCE" ${META:+--meta "$META"}) ;;
+          *) echo "sbom-store: mode must be missing, get or put" >&2; exit 2 ;;
         esac
         out="$(printf '%s\n' "$LINES" |
           mise exec -C "$root" -- env -C "$GITHUB_WORKSPACE" "$root/bin/sbom-store" "${args[@]}")" || rc=$?
         [ -z "$out" ] || printf '%s\n' "$out"
-        if [ "$MODE" = missing ]; then
+        if [ "$MODE" != put ]; then
           delim="sbom-store-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
           printf 'lines<<%s\n%s\n%s\n' "$delim" "$out" "$delim" >>"$GITHUB_OUTPUT"
         fi
